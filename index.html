@@ -1,0 +1,1577 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="BookOS" />
+<meta name="theme-color" content="#0A0A0A" />
+<meta name="mobile-web-app-capable" content="yes" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230A0A0A'/><text y='.9em' font-size='70' x='15'>📚</text></svg>" />
+<title>BookOS</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0A0A0A; overflow-x: hidden; }
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;600&display=swap');
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  @keyframes slideDown { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #0A0A0A; }
+  ::-webkit-scrollbar-thumb { background: #2A2A2A; border-radius: 4px; }
+  ::selection { background: #E8A83840; }
+  #update-banner {
+    display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
+    padding: 12px 20px; background: #1A1400; border-bottom: 1px solid #E8A838;
+    text-align: center; animation: slideDown 0.3s ease;
+  }
+  #update-banner span { color: #E8A838; font-size: 13px; font-family: 'Noto Sans JP', sans-serif; }
+  #update-banner button {
+    margin-left: 12px; padding: 4px 16px; background: #E8A838; border: none;
+    border-radius: 4px; color: #0A0A0A; font-size: 12px; font-weight: 600;
+    cursor: pointer; font-family: 'Noto Sans JP', sans-serif;
+  }
+</style>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+</head>
+<body>
+<div id="update-banner"><span>新しいバージョンがあります</span><button onclick="location.reload()">更新する</button></div>
+<div id="root"></div>
+
+<!-- Service Worker Registration & Auto-Update -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then(function(reg) {
+    // 定期的に更新チェック（1時間ごと）
+    setInterval(function() { reg.update(); }, 60 * 60 * 1000);
+    // 新しいSWが見つかったらバナー表示
+    reg.addEventListener('updatefound', function() {
+      var newSW = reg.installing;
+      if (newSW) {
+        newSW.addEventListener('statechange', function() {
+          if (newSW.state === 'activated' && navigator.serviceWorker.controller) {
+            document.getElementById('update-banner').style.display = 'block';
+          }
+        });
+      }
+    });
+  });
+  // 他のタブでSWが更新された場合もリロード
+  navigator.serviceWorker.addEventListener('controllerchange', function() {
+    document.getElementById('update-banner').style.display = 'block';
+  });
+}
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── Storage Helpers (localStorage) ───
+const store = {
+  async get(k) {
+    try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch { return null; }
+  },
+  async set(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.error("Storage set error:", e); }
+  },
+  async del(k) {
+    try { localStorage.removeItem(k); } catch {}
+  },
+  async list(prefix) {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith(prefix)) keys.push(key);
+      }
+      return keys;
+    } catch { return []; }
+  }
+};
+
+// ─── API Key Helper ───
+function getApiKey() {
+  return localStorage.getItem("bos-api-key") || "";
+}
+
+// ─── AI Helper ───
+async function aiCall(systemPrompt, userPrompt, maxTokens = 4000) {
+  const apiKey = getApiKey();
+  if (!apiKey) { alert("APIキーが設定されていません。設定画面でAnthropicのAPIキーを入力してください。"); return null; }
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }]
+      })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error("AI API error:", res.status, err);
+      if (res.status === 401) alert("APIキーが無効です。設定画面で正しいキーを入力してください。");
+      return null;
+    }
+    const data = await res.json();
+    return data.content?.[0]?.text || "";
+  } catch (e) {
+    console.error("AI call error:", e);
+    return null;
+  }
+}
+
+// ─── ID Generator ───
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+// ─── Date Helpers ───
+const fmt = (d) => new Date(d).toLocaleDateString("ja-JP", { year: "numeric", month: "short", day: "numeric" });
+const today = () => new Date().toISOString().split("T")[0];
+
+// ─── Default User Context ───
+const defaultCtx = {
+  values: "", goals: "", business_description: "", business_stage: "",
+  business_challenges: "", long_term_vision: "", strengths: "", weaknesses: "",
+  interests: "", repeated_themes: "", strategic_priorities: "",
+  preferred_platforms: "", preferred_voice: "", preferred_cta_style: "",
+  audience_segments: "", style_examples: "", phrases_to_avoid: ""
+};
+
+// ─── Review Schedule ───
+const REVIEW_DAYS = [1, 3, 7, 14, 30, 90];
+
+function genReviews(bookId, finishedDate) {
+  const base = new Date(finishedDate || Date.now());
+  return REVIEW_DAYS.map((d, i) => ({
+    id: uid(), book_id: bookId,
+    review_date: new Date(base.getTime() + d * 86400000).toISOString().split("T")[0],
+    review_type: ["memory", "action", "reflection", "business", "content", "deep"][i],
+    completed: false
+  }));
+}
+
+// ─── Star Rating Component ───
+function Stars({ value, onChange, size = 20 }) {
+  return (
+    <div style={{ display: "flex", gap: 2 }}>
+      {[1,2,3,4,5].map(s => (
+        <span key={s} onClick={() => onChange?.(s)} style={{
+          cursor: onChange ? "pointer" : "default", fontSize: size,
+          color: s <= value ? "#E8A838" : "#3A3A3A"
+        }}>★</span>
+      ))}
+    </div>
+  );
+}
+
+// ─── Score Bar ───
+function ScoreBar({ label, value }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3, color: "#A0A0A0" }}>
+        <span>{label}</span><span>{value}/10</span>
+      </div>
+      <div style={{ height: 4, background: "#1E1E1E", borderRadius: 2 }}>
+        <div style={{ height: "100%", width: `${value * 10}%`, background: "linear-gradient(90deg, #E8A838, #D4782F)", borderRadius: 2, transition: "width 0.5s" }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Tag Pill ───
+function Tag({ text, onRemove }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 10px",
+      background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 12,
+      fontSize: 11, color: "#C0C0C0"
+    }}>
+      {text}
+      {onRemove && <span onClick={onRemove} style={{ cursor: "pointer", color: "#666" }}>×</span>}
+    </span>
+  );
+}
+
+// ─── Loading Spinner ───
+function Spinner({ text = "AI処理中..." }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: 40 }}>
+      <div style={{
+        width: 32, height: 32, border: "2px solid #2A2A2A", borderTop: "2px solid #E8A838",
+        borderRadius: "50%", animation: "spin 1s linear infinite"
+      }} />
+      <span style={{ color: "#888", fontSize: 13 }}>{text}</span>
+    </div>
+  );
+}
+
+// ─── Tabs ───
+function Tabs({ tabs, active, onChange }) {
+  return (
+    <div style={{
+      display: "flex", gap: 0, borderBottom: "1px solid #1E1E1E",
+      overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none"
+    }}>
+      {tabs.map(t => (
+        <button key={t.key} onClick={() => onChange(t.key)} style={{
+          padding: "10px 16px", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
+          background: "none", border: "none", cursor: "pointer",
+          color: active === t.key ? "#E8A838" : "#666",
+          borderBottom: active === t.key ? "2px solid #E8A838" : "2px solid transparent",
+          transition: "all 0.2s"
+        }}>{t.label}</button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Shared Styles ───
+const lbl = { display: "block", fontSize: 11, fontWeight: 500, color: "#888", marginBottom: 4, letterSpacing: 0.5 };
+const inp = {
+  width: "100%", padding: "10px 12px", background: "#111", border: "1px solid #2A2A2A",
+  borderRadius: 6, color: "#E0E0E0", fontSize: 13, outline: "none",
+  fontFamily: "inherit", transition: "border-color 0.2s"
+};
+const btn = {
+  width: "100%", padding: "12px 20px", background: "#E8A838", border: "none",
+  borderRadius: 6, color: "#0A0A0A", fontSize: 13, fontWeight: 600,
+  cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s"
+};
+const smallBtn = {
+  padding: "4px 10px", fontSize: 11, background: "transparent",
+  border: "1px solid #2A2A2A", borderRadius: 6, color: "#888",
+  cursor: "pointer", fontFamily: "inherit"
+};
+
+// ═══════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════
+function BookOS() {
+  const [page, setPage] = useState("dash");
+  const [books, setBooks] = useState([]);
+  const [analyses, setAnalyses] = useState({});
+  const [drafts, setDrafts] = useState([]);
+  const [reviews, setReviews] = useState([]);
+  const [userCtx, setUserCtx] = useState(defaultCtx);
+  const [selectedBook, setSelectedBook] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  // ─── Load all data ───
+  useEffect(() => {
+    (async () => {
+      const [b, a, d, r, u] = await Promise.all([
+        store.get("bos-books"), store.get("bos-analyses"),
+        store.get("bos-drafts"), store.get("bos-reviews"),
+        store.get("bos-userctx")
+      ]);
+      if (b) setBooks(b);
+      if (a) setAnalyses(a);
+      if (d) setDrafts(d);
+      if (r) setReviews(r);
+      if (u) setUserCtx(u);
+      setLoading(false);
+    })();
+  }, []);
+
+  // ─── Save helpers ───
+  const saveBooks = useCallback((b) => { setBooks(b); store.set("bos-books", b); }, []);
+  const saveAnalyses = useCallback((a) => { setAnalyses(a); store.set("bos-analyses", a); }, []);
+  const saveDrafts = useCallback((d) => { setDrafts(d); store.set("bos-drafts", d); }, []);
+  const saveReviews = useCallback((r) => { setReviews(r); store.set("bos-reviews", r); }, []);
+  const saveUserCtx = useCallback((u) => { setUserCtx(u); store.set("bos-userctx", u); }, []);
+
+  // ─── Navigation ───
+  const nav = (pg, book = null) => { setPage(pg); if (book) setSelectedBook(book); window.scrollTo(0, 0); };
+
+  // ─── AI: Analyze Book ───
+  const analyzeBook = async (book) => {
+    setAiLoading(true);
+    const ctxStr = Object.entries(userCtx).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join("\n");
+    const sys = `You are BookOS AI — a personal knowledge structuring engine. You transform raw reading notes into structured knowledge assets. Always respond in valid JSON only. No markdown, no explanation outside JSON. Use the user's language (Japanese if their notes are in Japanese, English otherwise).`;
+    const prompt = `Analyze this book based on the user's raw notes and profile context.
+
+BOOK: "${book.title}" by ${book.author}
+Genre: ${book.genre || "N/A"}
+Rating: ${book.rating}/5
+Why picked: ${book.why_picked || "N/A"}
+Raw notes: ${book.raw_notes || "No notes provided"}
+
+USER CONTEXT:
+${ctxStr || "No context provided"}
+
+Return a single JSON object with these exact keys:
+{
+  "short_summary": "3 sentence summary",
+  "ultra_short": "1 sentence summary",
+  "core_message": "core message",
+  "problem_solved": "what problem this book solves",
+  "key_points": ["5 key points"],
+  "surprising_idea": "most surprising idea",
+  "memorable_concept": "most memorable concept",
+  "practical_insight": "most practical insight",
+  "thought_org": {
+    "stood_out": "what stood out to user",
+    "agreed": "what user agreed with",
+    "unclear": "what felt unclear",
+    "challenged": "what challenged user",
+    "expanded": "what expanded user's thinking"
+  },
+  "personal": {
+    "why_matters_now": "why this matters to user now",
+    "values_connection": "connection to values/goals",
+    "reinforces": "what reinforces current mindset",
+    "challenges": "what challenges current mindset",
+    "blind_spots": "potential blind spots",
+    "recurring_interests": "what this reveals about recurring interests"
+  },
+  "business": {
+    "overall": "how this applies to user's business",
+    "sales": "sales implications",
+    "leadership": "leadership implications",
+    "team": "team building implications",
+    "hiring": "hiring implications",
+    "systems": "systems/process implications",
+    "strategy": "strategic implications"
+  },
+  "actions": {
+    "today": "action for today",
+    "this_week": "action for this week",
+    "experiment": "business experiment to try",
+    "habit": "long-term habit to build"
+  },
+  "reuse": {
+    "one_min": "1-minute explanation",
+    "teaching": "teaching version",
+    "conversation": "conversation starter",
+    "sales_takeaway": "sales takeaway",
+    "leadership_takeaway": "leadership takeaway"
+  },
+  "scores": {
+    "personal_relevance": 8,
+    "business_relevance": 7,
+    "actionability": 8,
+    "reread_value": 6,
+    "sales_usefulness": 7,
+    "leadership_usefulness": 8,
+    "content_potential": 9,
+    "teaching_potential": 7
+  },
+  "content_angles": {
+    "shareable": "most shareable angle",
+    "practical": "most practical angle",
+    "controversial": "most controversial angle",
+    "emotional": "most emotional angle",
+    "educational": "most educational angle",
+    "founder_relevant": "most founder-relevant angle"
+  },
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
+}`;
+
+    const result = await aiCall(sys, prompt, 4000);
+    setAiLoading(false);
+    if (!result) return null;
+    try {
+      const cleaned = result.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+      return JSON.parse(cleaned);
+    } catch (e) {
+      console.error("Parse error:", e, result);
+      return null;
+    }
+  };
+
+  // ─── AI: Generate Content ───
+  const generateContent = async (book, analysis, platform) => {
+    setAiLoading(true);
+    const ctxStr = Object.entries(userCtx).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join("\n");
+    const platformInstructions = {
+      "x_post": "Generate a single X (Twitter) post. Max 280 chars. Include hook, insight, CTA.",
+      "x_thread": "Generate an X thread (5-8 tweets). First tweet is a hook. Last is CTA. Each tweet under 280 chars. Format as array.",
+      "note_article": "Generate a full note/blog article. Include title, intro, 3-5 sections with headings, conclusion, CTA.",
+      "youtube_script": "Generate a YouTube video script. Include title ideas, thumbnail text, opening hook, structure with timestamps, talking points, CTA.",
+      "youtube_short": "Generate a YouTube Short script (under 60 seconds). Hook in first 3 seconds. Punchy. CTA at end.",
+      "instagram_carousel": "Generate Instagram carousel (8-10 slides). First slide is hook. Each slide has key message. Last slide is CTA. Include caption.",
+      "newsletter": "Generate a newsletter draft. Subject line, preview text, intro hook, 3 key sections, CTA, sign-off."
+    };
+    const sys = `You are BookOS Content AI — an elite content strategist. Generate platform-specific content from book knowledge. Use the user's preferred voice/tone. Always respond in valid JSON. Use the user's language.`;
+    const prompt = `Generate ${platform} content from this book analysis.
+
+BOOK: "${book.title}" by ${book.author}
+Core message: ${analysis?.core_message || "N/A"}
+Key points: ${JSON.stringify(analysis?.key_points || [])}
+Content angles: ${JSON.stringify(analysis?.content_angles || {})}
+
+USER CONTEXT:
+${ctxStr || "No context"}
+
+PLATFORM INSTRUCTIONS:
+${platformInstructions[platform] || "Generate engaging content for this platform."}
+
+Return JSON:
+{
+  "platform": "${platform}",
+  "title": "content title",
+  "hook": "opening hook",
+  "body": "full content body (for threads, use array of tweets)",
+  "cta": "call to action",
+  "tone": "detected tone",
+  "notes": "production notes"
+}`;
+
+    const result = await aiCall(sys, prompt, 3000);
+    setAiLoading(false);
+    if (!result) return null;
+    try {
+      const cleaned = result.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+      return JSON.parse(cleaned);
+    } catch { return null; }
+  };
+
+  // ─── AI: Chat ───
+  const aiChat = async (book, analysis, message, history) => {
+    const apiKey = getApiKey();
+    if (!apiKey) { alert("APIキーが設定されていません。"); return "APIキーを設定してください。"; }
+    const ctxStr = Object.entries(userCtx).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join("\n");
+    const sys = `You are BookOS AI Chat — a personal thinking partner for the book "${book.title}" by ${book.author}.
+You have access to the user's raw notes, AI analysis, and personal context.
+Answer thoughtfully. Be specific to this book. Use the user's language.
+
+BOOK NOTES: ${book.raw_notes || "None"}
+ANALYSIS: ${JSON.stringify(analysis || {})}
+USER CONTEXT: ${ctxStr || "None"}`;
+    const msgs = [...(history || []).map(m => ({ role: m.role, content: m.content })), { role: "user", content: message }];
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, system: sys, messages: msgs })
+      });
+      const data = await res.json();
+      return data.content?.[0]?.text || "エラーが発生しました。";
+    } catch { return "接続エラーが発生しました。"; }
+  };
+
+  // ─── Today's reviews ───
+  const todayReviews = reviews.filter(r => r.review_date <= today() && !r.completed);
+  const todayStr = today();
+
+  if (loading) return (
+    <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Spinner text="BookOS を起動中..." />
+    </div>
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // PAGES
+  // ═══════════════════════════════════════════════════════════
+
+  // ─── DASHBOARD ───
+  const DashboardPage = () => {
+    const recentBooks = [...books].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5);
+    const pendingActions = books.filter(b => {
+      const a = analyses[b.id];
+      return a?.actions && !b.actions_done;
+    }).slice(0, 3);
+    const pendingDrafts = drafts.filter(d => d.status === "draft").slice(0, 5);
+    const topScored = [...books].map(b => ({ ...b, score: analyses[b.id]?.scores?.content_potential || 0 }))
+      .sort((a, b) => b.score - a.score).slice(0, 3);
+
+    return (
+      <div>
+        <div style={{ marginBottom: 32 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 300, color: "#F0F0F0", marginBottom: 4 }}>おはようございます</h2>
+          <p style={{ color: "#666", fontSize: 13 }}>
+            {books.length}冊の本 · {todayReviews.length}件のレビュー待ち · {pendingDrafts.length}件の下書き
+          </p>
+        </div>
+
+        {todayReviews.length > 0 && (
+          <div style={{ background: "#1A1400", border: "1px solid #332800", borderRadius: 8, padding: 16, marginBottom: 24 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#E8A838", marginBottom: 8 }}>今日のレビュー</div>
+            {todayReviews.slice(0, 3).map(r => {
+              const book = books.find(b => b.id === r.book_id);
+              return book ? (
+                <div key={r.id} onClick={() => nav("detail", book)} style={{
+                  cursor: "pointer", padding: "8px 0", borderBottom: "1px solid #221C00",
+                  display: "flex", justifyContent: "space-between", alignItems: "center"
+                }}>
+                  <span style={{ color: "#D0D0D0", fontSize: 13 }}>{book.title}</span>
+                  <span style={{ color: "#888", fontSize: 11 }}>{r.review_type}</span>
+                </div>
+              ) : null;
+            })}
+          </div>
+        )}
+
+        <button onClick={() => nav("add")} style={{
+          width: "100%", padding: 16, background: "#111", border: "1px dashed #2A2A2A",
+          borderRadius: 8, color: "#666", fontSize: 14, cursor: "pointer", marginBottom: 24,
+          transition: "all 0.2s", fontFamily: "inherit"
+        }}
+          onMouseEnter={e => { e.target.style.borderColor = "#E8A838"; e.target.style.color = "#E8A838"; }}
+          onMouseLeave={e => { e.target.style.borderColor = "#2A2A2A"; e.target.style.color = "#666"; }}
+        >+ 本を追加</button>
+
+        {recentBooks.length > 0 && (
+          <div style={{ marginBottom: 32 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0" }}>最近の本</h3>
+              <span onClick={() => nav("library")} style={{ fontSize: 12, color: "#E8A838", cursor: "pointer" }}>すべて →</span>
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {recentBooks.map(b => (
+                <div key={b.id} onClick={() => nav("detail", b)} style={{
+                  padding: 14, background: "#111", border: "1px solid #1A1A1A", borderRadius: 8,
+                  cursor: "pointer", transition: "border-color 0.2s"
+                }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = "#2A2A2A"}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = "#1A1A1A"}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: "#E0E0E0" }}>{b.title}</div>
+                      <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{b.author}</div>
+                    </div>
+                    <Stars value={b.rating} size={12} />
+                  </div>
+                  {analyses[b.id]?.ultra_short && (
+                    <div style={{ fontSize: 12, color: "#888", marginTop: 8, lineHeight: 1.5 }}>
+                      {analyses[b.id].ultra_short}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                    {(analyses[b.id]?.tags || []).slice(0, 3).map(t => <Tag key={t} text={t} />)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {topScored.length > 0 && topScored[0].score > 0 && (
+          <div style={{ marginBottom: 32 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 12 }}>コンテンツポテンシャル TOP</h3>
+            {topScored.map(b => (
+              <div key={b.id} onClick={() => nav("detail", b)} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "10px 0", borderBottom: "1px solid #1A1A1A", cursor: "pointer"
+              }}>
+                <span style={{ fontSize: 13, color: "#C0C0C0" }}>{b.title}</span>
+                <span style={{ fontSize: 12, color: "#E8A838" }}>{b.score}/10</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {pendingDrafts.length > 0 && (
+          <div>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 12 }}>下書き</h3>
+            {pendingDrafts.map(d => (
+              <div key={d.id} onClick={() => nav("drafts")} style={{
+                padding: "10px 0", borderBottom: "1px solid #1A1A1A", cursor: "pointer",
+                display: "flex", justifyContent: "space-between"
+              }}>
+                <span style={{ fontSize: 13, color: "#C0C0C0" }}>{d.title || "無題"}</span>
+                <span style={{ fontSize: 11, color: "#666" }}>{d.platform}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {books.length === 0 && (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "#444" }}>
+            <div style={{ fontSize: 40, marginBottom: 16 }}>📚</div>
+            <div style={{ fontSize: 15, marginBottom: 8 }}>まだ本が登録されていません</div>
+            <div style={{ fontSize: 12 }}>最初の本を追加して、知識システムを構築しましょう</div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── ADD BOOK ───
+  const AddBookPage = () => {
+    const [phase, setPhase] = useState("capture");
+    const [form, setForm] = useState({
+      title: "", author: "", genre: "", rating: 4, finished_at: today(),
+      raw_notes: "", why_picked: "", excerpt: "", raw_transcript: ""
+    });
+    const [captureText, setCaptureText] = useState("");
+    const [aiParsing, setAiParsing] = useState(false);
+    const [showTip, setShowTip] = useState(true);
+    const captureRef = useRef(null);
+    const u = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+    const parseCapture = async () => {
+      const text = captureText.trim();
+      if (!text) return;
+      setAiParsing(true);
+      const sys = `You are a smart parser for a book reading app. Extract structured book info from the user's rough text input. This text may have been dictated by voice, so it might have speech artifacts.
+Respond ONLY in valid JSON. No markdown fences. Use the same language the user wrote/spoke in.`;
+      const prompt = `Parse this text about a book the user read:
+
+"${text}"
+
+Return JSON:
+{
+  "title": "detected book title or empty string",
+  "author": "detected author or empty string",
+  "genre": "detected genre or empty string if unclear",
+  "notes": "everything else as reading notes — clean up slightly but preserve the user's meaning and voice",
+  "why_picked": "reason for picking the book if mentioned, else empty string",
+  "excerpt": "any quotes or specific excerpts mentioned, else empty string"
+}
+
+Rules:
+- Look for patterns like "〇〇という本", "〇〇を読んだ", "〇〇 by 〇〇", "著者は〇〇" to find title and author
+- Everything that isn't clearly title/author/genre goes into notes
+- Keep the user's original thoughts and phrasing — just clean up obvious speech artifacts
+- If you cannot detect title or author, return empty strings — don't guess
+- notes should never be empty if the user provided any thoughts`;
+
+      const result = await aiCall(sys, prompt, 1000);
+      let parsed = {};
+      try {
+        const cleaned = (result || "").replace(/```json\s*/g, "").replace(/```/g, "").trim();
+        parsed = JSON.parse(cleaned);
+      } catch {
+        parsed = { title: "", author: "", genre: "", notes: text, why_picked: "", excerpt: "" };
+      }
+
+      setForm(prev => ({
+        ...prev,
+        title: parsed.title || prev.title,
+        author: parsed.author || prev.author,
+        genre: parsed.genre || prev.genre,
+        raw_notes: parsed.notes || text,
+        why_picked: parsed.why_picked || prev.why_picked,
+        excerpt: parsed.excerpt || prev.excerpt,
+        raw_transcript: text
+      }));
+      setAiParsing(false);
+      setPhase("review");
+    };
+
+    const skipToReview = () => {
+      if (captureText.trim()) {
+        setForm(prev => ({ ...prev, raw_notes: captureText.trim(), raw_transcript: captureText.trim() }));
+      }
+      setPhase("review");
+    };
+
+    const handleSave = async () => {
+      if (!form.title && !form.raw_notes) return;
+      setPhase("processing");
+      const book = {
+        ...form, title: form.title || "無題の本",
+        id: uid(), created_at: new Date().toISOString(), actions_done: false
+      };
+      const newBooks = [...books, book];
+      saveBooks(newBooks);
+      const newReviews = [...reviews, ...genReviews(book.id, book.finished_at)];
+      saveReviews(newReviews);
+      const analysis = await analyzeBook(book);
+      if (analysis) {
+        saveAnalyses({ ...analyses, [book.id]: analysis });
+      }
+      nav("detail", book);
+    };
+
+    if (phase === "capture") return (
+      <div style={{ display: "flex", flexDirection: "column", minHeight: "70vh" }}>
+        <div style={{ textAlign: "center", marginBottom: 20, marginTop: 4 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 300, color: "#F0F0F0", marginBottom: 6 }}>本を追加</h2>
+          <p style={{ fontSize: 12, color: "#666", lineHeight: 1.6 }}>読んだ本について自由に入力してください</p>
+        </div>
+
+        {showTip && (
+          <div style={{ padding: 14, marginBottom: 16, background: "#110E00", border: "1px solid #2A2200", borderRadius: 10, position: "relative" }}>
+            <button onClick={() => setShowTip(false)} style={{ position: "absolute", top: 8, right: 10, background: "none", border: "none", color: "#554400", cursor: "pointer", fontSize: 14 }}>×</button>
+            <div style={{ fontSize: 12, color: "#C89B30", marginBottom: 6, fontWeight: 600 }}>音声で入力できます</div>
+            <div style={{ fontSize: 11, color: "#887730", lineHeight: 1.7 }}>
+              下のテキストエリアをタップ → キーボードの<span style={{ color: "#C89B30", fontWeight: 600 }}> マイクボタン </span>を押すと音声入力できます。
+              タイトル・著者・感想をまとめて話すだけでOK。AIが自動で構造化します。
+            </div>
+          </div>
+        )}
+
+        <div style={{ position: "relative", marginBottom: 12 }}>
+          <textarea ref={captureRef} value={captureText} onChange={e => setCaptureText(e.target.value)}
+            placeholder={`例：「アトミックハビッツ、ジェームズ・クリアの本を読み終わった。環境が行動を変えるという話が一番印象に残った。特に、意志力に頼らずに習慣を作る仕組みの部分が自分のビジネスにも使えると思った...」\n\nタイトル・著者・感想を自由に入力してください。\n音声入力の場合はキーボードのマイクボタンをタップ。`}
+            style={{ width: "100%", minHeight: 200, padding: 16, background: "#0E0E0E", border: "1px solid #1E1E1E", borderRadius: 10, color: "#E0E0E0", fontSize: 15, lineHeight: 1.8, resize: "vertical", outline: "none", fontFamily: "inherit", transition: "border-color 0.2s" }}
+            onFocus={e => e.target.style.borderColor = "#E8A838"}
+            onBlur={e => e.target.style.borderColor = "#1E1E1E"}
+            autoFocus
+          />
+          <div style={{ position: "absolute", bottom: 8, right: 12, fontSize: 10, color: "#333" }}>
+            {captureText.length > 0 && `${captureText.length}文字`}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button onClick={parseCapture} disabled={!captureText.trim() || aiParsing}
+            style={{ ...btn, flex: 1, opacity: captureText.trim() ? 1 : 0.3, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {aiParsing ? (<><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>◌</span> AIが解析中...</>) : (<>AIで自動解析</>)}
+          </button>
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={skipToReview}
+            style={{ flex: 1, padding: "10px 16px", fontSize: 12, background: "transparent", border: "1px solid #1E1E1E", borderRadius: 6, color: "#666", cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s" }}>
+            手動で入力する →
+          </button>
+        </div>
+
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 10, color: "#444", marginBottom: 8, fontWeight: 600, letterSpacing: 1 }}>入力例</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {[
+              "影響力の武器を読んだ。返報性の原理が営業にめちゃ使えると思った",
+              "7つの習慣、コヴィーの本。主体的であることが全ての基盤だと改めて感じた",
+              "イシューからはじめよ、安宅和人。問いの質が全てを決めるという話"
+            ].map((ex, i) => (
+              <button key={i} onClick={() => setCaptureText(ex)}
+                style={{ textAlign: "left", padding: "8px 12px", background: "#0E0E0E", border: "1px solid #161616", borderRadius: 6, color: "#555", fontSize: 11, cursor: "pointer", fontFamily: "inherit", lineHeight: 1.5, transition: "all 0.2s" }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "#2A2A2A"; e.currentTarget.style.color = "#888"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = "#161616"; e.currentTarget.style.color = "#555"; }}
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+
+    if (phase === "review") return (
+      <div>
+        <div style={{ marginBottom: 20 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 300, color: "#F0F0F0", marginBottom: 4 }}>確認 & 編集</h2>
+          <p style={{ fontSize: 12, color: "#666" }}>
+            {form.raw_transcript ? "AIが解析した結果です。" : "本の情報を入力してください。"}必要に応じて修正できます。
+          </p>
+        </div>
+
+        {form.raw_transcript && (
+          <details style={{ marginBottom: 16 }}>
+            <summary style={{ fontSize: 11, color: "#555", cursor: "pointer", marginBottom: 8 }}>元の入力テキスト</summary>
+            <div style={{ padding: 12, background: "#0E0E0E", border: "1px solid #1A1A1A", borderRadius: 6, fontSize: 12, color: "#777", lineHeight: 1.7 }}>
+              {form.raw_transcript}
+            </div>
+          </details>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label style={lbl}>タイトル {form.title && <span style={{ color: "#4A8" }}>OK</span>}</label>
+            <input value={form.title} onChange={e => u("title", e.target.value)} placeholder="本のタイトル（空でも保存可）" style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>著者 {form.author && <span style={{ color: "#4A8" }}>OK</span>}</label>
+            <input value={form.author} onChange={e => u("author", e.target.value)} placeholder="著者名" style={inp} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={lbl}>ジャンル</label>
+              <input value={form.genre} onChange={e => u("genre", e.target.value)} placeholder="ビジネス, 哲学..." style={inp} />
+            </div>
+            <div>
+              <label style={lbl}>読了日</label>
+              <input type="date" value={form.finished_at} onChange={e => u("finished_at", e.target.value)} style={inp} />
+            </div>
+          </div>
+          <div>
+            <label style={lbl}>評価</label>
+            <Stars value={form.rating} onChange={v => u("rating", v)} size={24} />
+          </div>
+          <div>
+            <label style={lbl}>読書メモ {form.raw_notes && <span style={{ color: "#4A8" }}>OK</span>}</label>
+            <textarea value={form.raw_notes} onChange={e => u("raw_notes", e.target.value)}
+              placeholder="感想、気づき..."
+              style={{ ...inp, minHeight: 100, resize: "vertical" }} />
+          </div>
+          <details style={{ marginBottom: 4 }}>
+            <summary style={{ fontSize: 11, color: "#555", cursor: "pointer" }}>+ その他のフィールド（任意）</summary>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+              <div>
+                <label style={lbl}>この本を選んだ理由</label>
+                <input value={form.why_picked} onChange={e => u("why_picked", e.target.value)} placeholder="きっかけ、期待していたこと..." style={inp} />
+              </div>
+              <div>
+                <label style={lbl}>印象的な引用・フレーズ</label>
+                <textarea value={form.excerpt} onChange={e => u("excerpt", e.target.value)} placeholder="心に残った一節..." style={{ ...inp, minHeight: 50 }} />
+              </div>
+            </div>
+          </details>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button onClick={() => setPhase("capture")} style={{ ...btn, flex: "0 0 auto", width: "auto", padding: "12px 16px", background: "transparent", border: "1px solid #2A2A2A", color: "#888" }}>←</button>
+            <button onClick={handleSave} disabled={!form.title && !form.raw_notes}
+              style={{ ...btn, flex: 1, opacity: (form.title || form.raw_notes) ? 1 : 0.3 }}>
+              保存 & AI分析開始
+            </button>
+          </div>
+          <div style={{ textAlign: "center", fontSize: 11, color: "#444", marginTop: 2 }}>タイトルやメモが空でも保存できます</div>
+        </div>
+      </div>
+    );
+
+    if (phase === "processing") return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
+        <div style={{ position: "relative", marginBottom: 24 }}>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", border: "2px solid #1E1E1E", borderTopColor: "#E8A838", animation: "spin 1s linear infinite" }} />
+        </div>
+        <div style={{ fontSize: 15, color: "#D0D0D0", marginBottom: 8, fontWeight: 300 }}>AIが分析中</div>
+        <div style={{ fontSize: 12, color: "#666" }}>
+          {form.title ? `「${form.title}」` : "読書メモ"}を構造化しています...
+        </div>
+        <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+          {["要約を生成", "ビジネス適用を分析", "アクションを抽出", "コンテンツ切り口を発見"].map((s, i) => (
+            <div key={i} style={{ fontSize: 11, color: "#444", animation: `fadeInUp 0.5s ease ${i * 0.6}s both` }}>{s}...</div>
+          ))}
+        </div>
+      </div>
+    );
+
+    return null;
+  };
+
+  // ─── LIBRARY ───
+  const LibraryPage = () => {
+    const [search, setSearch] = useState("");
+    const [sortBy, setSortBy] = useState("date");
+    const filtered = books.filter(b =>
+      b.title.toLowerCase().includes(search.toLowerCase()) ||
+      b.author.toLowerCase().includes(search.toLowerCase()) ||
+      (analyses[b.id]?.tags || []).some(t => t.toLowerCase().includes(search.toLowerCase()))
+    ).sort((a, b) => {
+      if (sortBy === "date") return new Date(b.created_at) - new Date(a.created_at);
+      if (sortBy === "rating") return b.rating - a.rating;
+      if (sortBy === "relevance") return (analyses[b.id]?.scores?.personal_relevance || 0) - (analyses[a.id]?.scores?.personal_relevance || 0);
+      return 0;
+    });
+
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0" }}>ライブラリ</h2>
+          <span style={{ fontSize: 12, color: "#666" }}>{books.length}冊</span>
+        </div>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="タイトル、著者、タグで検索..." style={{ ...inp, marginBottom: 12 }} />
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {[["date","新着順"],["rating","評価順"],["relevance","関連度順"]].map(([k,l]) => (
+            <button key={k} onClick={() => setSortBy(k)} style={{
+              padding: "4px 12px", fontSize: 11, borderRadius: 12, border: "1px solid",
+              borderColor: sortBy === k ? "#E8A838" : "#2A2A2A",
+              background: sortBy === k ? "#1A1400" : "transparent",
+              color: sortBy === k ? "#E8A838" : "#666", cursor: "pointer"
+            }}>{l}</button>
+          ))}
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {filtered.map(b => {
+            const a = analyses[b.id];
+            return (
+              <div key={b.id} onClick={() => nav("detail", b)} style={{
+                padding: 16, background: "#111", border: "1px solid #1A1A1A", borderRadius: 8,
+                cursor: "pointer", transition: "all 0.2s"
+              }}
+                onMouseEnter={e => e.currentTarget.style.borderColor = "#2A2A2A"}
+                onMouseLeave={e => e.currentTarget.style.borderColor = "#1A1A1A"}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: "#E0E0E0" }}>{b.title}</div>
+                    <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{b.author} · {b.genre}</div>
+                  </div>
+                  <Stars value={b.rating} size={12} />
+                </div>
+                {a?.ultra_short && <div style={{ fontSize: 12, color: "#888", marginTop: 8 }}>{a.ultra_short}</div>}
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  {(a?.tags || []).slice(0, 4).map(t => <Tag key={t} text={t} />)}
+                  {a?.scores && (
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "#E8A838" }}>
+                      {a.scores.content_potential}/10
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {filtered.length === 0 && (
+          <div style={{ textAlign: "center", padding: 40, color: "#444", fontSize: 13 }}>
+            {search ? "検索結果がありません" : "本を追加してください"}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── BOOK DETAIL ───
+  const BookDetailPage = () => {
+    const book = selectedBook;
+    const a = analyses[book?.id] || null;
+    const [tab, setTab] = useState("summary");
+    const [chatMsgs, setChatMsgs] = useState([]);
+    const [chatInput, setChatInput] = useState("");
+    const [chatLoading, setChatLoading] = useState(false);
+    const [genPlatform, setGenPlatform] = useState("x_post");
+    const [genResult, setGenResult] = useState(null);
+    const chatEndRef = useRef(null);
+
+    if (!book) return <div style={{ color: "#666" }}>本が選択されていません</div>;
+
+    const tabs = [
+      { key: "summary", label: "要約" },
+      { key: "thought", label: "思考整理" },
+      { key: "personal", label: "パーソナル" },
+      { key: "business", label: "ビジネス" },
+      { key: "action", label: "アクション" },
+      { key: "reuse", label: "再利用" },
+      { key: "content", label: "コンテンツ" },
+      { key: "chat", label: "AIチャット" },
+    ];
+
+    const handleChat = async () => {
+      if (!chatInput.trim()) return;
+      const userMsg = { role: "user", content: chatInput };
+      const newMsgs = [...chatMsgs, userMsg];
+      setChatMsgs(newMsgs);
+      setChatInput("");
+      setChatLoading(true);
+      const reply = await aiChat(book, a, chatInput, chatMsgs);
+      setChatMsgs([...newMsgs, { role: "assistant", content: reply }]);
+      setChatLoading(false);
+    };
+
+    const handleGenerate = async () => {
+      const result = await generateContent(book, a, genPlatform);
+      if (result) {
+        setGenResult(result);
+        const draft = {
+          id: uid(), book_id: book.id, platform: genPlatform,
+          title: result.title, hook: result.hook, body: typeof result.body === "string" ? result.body : JSON.stringify(result.body),
+          cta: result.cta, tone: result.tone, status: "draft",
+          created_at: new Date().toISOString()
+        };
+        saveDrafts([...drafts, draft]);
+      }
+    };
+
+    const handleReanalyze = async () => {
+      const analysis = await analyzeBook(book);
+      if (analysis) {
+        saveAnalyses({ ...analyses, [book.id]: analysis });
+      }
+    };
+
+    const handleDelete = () => {
+      saveBooks(books.filter(b => b.id !== book.id));
+      const newA = { ...analyses }; delete newA[book.id]; saveAnalyses(newA);
+      saveReviews(reviews.filter(r => r.book_id !== book.id));
+      saveDrafts(drafts.filter(d => d.book_id !== book.id));
+      nav("library");
+    };
+
+    const Section = ({ title, children }) => (
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: "#E8A838", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>{title}</div>
+        <div style={{ color: "#C0C0C0", fontSize: 13, lineHeight: 1.7 }}>{children}</div>
+      </div>
+    );
+
+    return (
+      <div>
+        <button onClick={() => nav("library")} style={{ background: "none", border: "none", color: "#666", cursor: "pointer", fontSize: 12, marginBottom: 16 }}>← ライブラリに戻る</button>
+
+        <div style={{ marginBottom: 20 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 400, color: "#F0F0F0", marginBottom: 4 }}>{book.title}</h2>
+          <div style={{ fontSize: 13, color: "#888" }}>{book.author} · {book.genre} · {fmt(book.finished_at)}</div>
+          <div style={{ marginTop: 6 }}><Stars value={book.rating} size={16} /></div>
+          <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+            {(a?.tags || []).map(t => <Tag key={t} text={t} />)}
+          </div>
+        </div>
+
+        {!a && (
+          <div style={{ textAlign: "center", padding: 30 }}>
+            <div style={{ color: "#666", fontSize: 13, marginBottom: 12 }}>まだAI分析が生成されていません</div>
+            <button onClick={handleReanalyze} style={btn}>AI分析を実行</button>
+          </div>
+        )}
+
+        {a && (
+          <>
+            <Tabs tabs={tabs} active={tab} onChange={setTab} />
+            <div style={{ padding: "20px 0" }}>
+
+              {tab === "summary" && (
+                <div>
+                  <Section title="要約">{a.short_summary}</Section>
+                  <Section title="一言で言うと">{a.ultra_short}</Section>
+                  <Section title="コアメッセージ">{a.core_message}</Section>
+                  <Section title="この本が解決する問題">{a.problem_solved}</Section>
+                  <Section title="キーポイント">
+                    <ul style={{ paddingLeft: 16, margin: 0 }}>
+                      {(a.key_points || []).map((p, i) => <li key={i} style={{ marginBottom: 6 }}>{p}</li>)}
+                    </ul>
+                  </Section>
+                  <Section title="最も驚いたアイデア">{a.surprising_idea}</Section>
+                  <Section title="最も記憶に残るコンセプト">{a.memorable_concept}</Section>
+                  <Section title="最も実践的な洞察">{a.practical_insight}</Section>
+                  {a.scores && (
+                    <Section title="スコア">
+                      {Object.entries(a.scores).map(([k, v]) => (
+                        <ScoreBar key={k} label={k.replace(/_/g, " ")} value={v} />
+                      ))}
+                    </Section>
+                  )}
+                </div>
+              )}
+
+              {tab === "thought" && a.thought_org && (
+                <div>
+                  <Section title="印象に残ったこと">{a.thought_org.stood_out}</Section>
+                  <Section title="共感したこと">{a.thought_org.agreed}</Section>
+                  <Section title="よくわからなかったこと">{a.thought_org.unclear}</Section>
+                  <Section title="挑戦されたこと">{a.thought_org.challenged}</Section>
+                  <Section title="思考が広がったこと">{a.thought_org.expanded}</Section>
+                </div>
+              )}
+
+              {tab === "personal" && a.personal && (
+                <div>
+                  <Section title="今の自分にとって重要な理由">{a.personal.why_matters_now}</Section>
+                  <Section title="価値観・目標との接続">{a.personal.values_connection}</Section>
+                  <Section title="現在のマインドセットを強化する点">{a.personal.reinforces}</Section>
+                  <Section title="現在のマインドセットに挑戦する点">{a.personal.challenges}</Section>
+                  <Section title="潜在的な盲点">{a.personal.blind_spots}</Section>
+                  <Section title="繰り返し現れる関心事">{a.personal.recurring_interests}</Section>
+                </div>
+              )}
+
+              {tab === "business" && a.business && (
+                <div>
+                  <Section title="ビジネスへの全体適用">{a.business.overall}</Section>
+                  <Section title="営業への示唆">{a.business.sales}</Section>
+                  <Section title="リーダーシップへの示唆">{a.business.leadership}</Section>
+                  <Section title="チームビルディング">{a.business.team}</Section>
+                  <Section title="採用への示唆">{a.business.hiring}</Section>
+                  <Section title="システム・プロセス設計">{a.business.systems}</Section>
+                  <Section title="戦略的含意">{a.business.strategy}</Section>
+                </div>
+              )}
+
+              {tab === "action" && a.actions && (
+                <div>
+                  <Section title="今日のアクション">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.actions.today}</div>
+                  </Section>
+                  <Section title="今週のアクション">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.actions.this_week}</div>
+                  </Section>
+                  <Section title="ビジネス実験">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.actions.experiment}</div>
+                  </Section>
+                  <Section title="長期的な習慣">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.actions.habit}</div>
+                  </Section>
+                </div>
+              )}
+
+              {tab === "reuse" && a.reuse && (
+                <div>
+                  <Section title="1分で説明">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.reuse.one_min}</div>
+                  </Section>
+                  <Section title="教える版">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.reuse.teaching}</div>
+                  </Section>
+                  <Section title="会話スターター">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.reuse.conversation}</div>
+                  </Section>
+                  <Section title="営業テイクアウェイ">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.reuse.sales_takeaway}</div>
+                  </Section>
+                  <Section title="リーダーシップテイクアウェイ">
+                    <div style={{ padding: 12, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>{a.reuse.leadership_takeaway}</div>
+                  </Section>
+                </div>
+              )}
+
+              {tab === "content" && (
+                <div>
+                  {a.content_angles && (
+                    <Section title="コンテンツ切り口">
+                      {Object.entries(a.content_angles).map(([k, v]) => (
+                        <div key={k} style={{ marginBottom: 10 }}>
+                          <span style={{ fontSize: 11, color: "#E8A838" }}>{k.replace(/_/g, " ")}</span>
+                          <div style={{ fontSize: 13, color: "#C0C0C0", marginTop: 2 }}>{v}</div>
+                        </div>
+                      ))}
+                    </Section>
+                  )}
+                  <Section title="コンテンツ生成">
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                      {[["x_post","X 投稿"],["x_thread","X スレッド"],["note_article","note記事"],["youtube_script","YouTube"],["youtube_short","YouTube Short"],["instagram_carousel","Instagram"],["newsletter","ニュースレター"]].map(([k,l]) => (
+                        <button key={k} onClick={() => setGenPlatform(k)} style={{
+                          padding: "6px 12px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                          background: genPlatform === k ? "#1A1400" : "#111",
+                          border: `1px solid ${genPlatform === k ? "#E8A838" : "#2A2A2A"}`,
+                          color: genPlatform === k ? "#E8A838" : "#888"
+                        }}>{l}</button>
+                      ))}
+                    </div>
+                    <button onClick={handleGenerate} disabled={aiLoading} style={btn}>
+                      {aiLoading ? "生成中..." : `${genPlatform} コンテンツを生成`}
+                    </button>
+                  </Section>
+                  {genResult && (
+                    <Section title="生成結果">
+                      <div style={{ padding: 16, background: "#111", borderRadius: 8, border: "1px solid #1E1E1E" }}>
+                        {genResult.title && <div style={{ fontWeight: 600, marginBottom: 8, color: "#E0E0E0" }}>{genResult.title}</div>}
+                        {genResult.hook && <div style={{ color: "#E8A838", marginBottom: 8, fontSize: 12 }}>{genResult.hook}</div>}
+                        <div style={{ whiteSpace: "pre-wrap", marginBottom: 8 }}>
+                          {typeof genResult.body === "string" ? genResult.body : JSON.stringify(genResult.body, null, 2)}
+                        </div>
+                        {genResult.cta && <div style={{ color: "#E8A838", fontSize: 12, marginTop: 8 }}>CTA: {genResult.cta}</div>}
+                        <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>下書きに保存済み</div>
+                      </div>
+                    </Section>
+                  )}
+                </div>
+              )}
+
+              {tab === "chat" && (
+                <div>
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                      {["この本の核心をシンプルに説明して", "著者の主張に反論して", "営業に使える洞察は？", "Xスレッドを作って", "note記事にして"].map(q => (
+                        <button key={q} onClick={() => { setChatInput(q); }} style={{
+                          padding: "4px 10px", fontSize: 10, background: "#111", border: "1px solid #2A2A2A",
+                          borderRadius: 12, color: "#888", cursor: "pointer"
+                        }}>{q}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: 400, overflowY: "auto", marginBottom: 12 }}>
+                    {chatMsgs.map((m, i) => (
+                      <div key={i} style={{
+                        padding: 12, marginBottom: 8, borderRadius: 8,
+                        background: m.role === "user" ? "#1A1400" : "#111",
+                        border: `1px solid ${m.role === "user" ? "#332800" : "#1E1E1E"}`
+                      }}>
+                        <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>{m.role === "user" ? "あなた" : "BookOS AI"}</div>
+                        <div style={{ fontSize: 13, color: "#D0D0D0", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{m.content}</div>
+                      </div>
+                    ))}
+                    {chatLoading && <Spinner text="考え中..." />}
+                    <div ref={chatEndRef} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input value={chatInput} onChange={e => setChatInput(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && handleChat()}
+                      placeholder="この本について何でも聞いてください..."
+                      style={{ ...inp, flex: 1 }} />
+                    <button onClick={handleChat} disabled={chatLoading || !chatInput.trim()} style={{
+                      ...btn, padding: "8px 16px", minWidth: 60, width: "auto"
+                    }}>送信</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        <div style={{ borderTop: "1px solid #1A1A1A", marginTop: 30, paddingTop: 16, display: "flex", gap: 8 }}>
+          <button onClick={handleReanalyze} disabled={aiLoading} style={{
+            ...btn, background: "transparent", border: "1px solid #2A2A2A", color: "#888", fontSize: 11
+          }}>{aiLoading ? "分析中..." : "再分析"}</button>
+          <button onClick={handleDelete} style={{
+            ...btn, background: "transparent", border: "1px solid #331111", color: "#994444", fontSize: 11, marginLeft: "auto"
+          }}>削除</button>
+        </div>
+      </div>
+    );
+  };
+
+  // ─── USER CONTEXT / PROFILE ───
+  const ProfilePage = () => {
+    const [form, setForm] = useState({ ...userCtx });
+    const [apiKey, setApiKey] = useState(getApiKey());
+    const [showKey, setShowKey] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const u = (k, v) => setForm({ ...form, [k]: v });
+    const save = () => {
+      saveUserCtx(form);
+      localStorage.setItem("bos-api-key", apiKey);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    };
+
+    const fields = [
+      ["values", "価値観", "大切にしていること"],
+      ["goals", "目標", "今年の目標、長期目標"],
+      ["business_description", "ビジネス概要", "何をしている会社か"],
+      ["business_stage", "ビジネスステージ", "創業期、成長期、拡大期..."],
+      ["business_challenges", "現在の課題", "今ぶつかっている壁"],
+      ["long_term_vision", "長期ビジョン", "10年後のイメージ"],
+      ["strengths", "強み", "自分の得意なこと"],
+      ["weaknesses", "弱み", "改善したいこと"],
+      ["interests", "関心領域", "ドメイン、テーマ"],
+      ["repeated_themes", "繰り返すテーマ", "何度も考えること"],
+      ["strategic_priorities", "戦略的優先事項", "今最も注力すべきこと"],
+      ["preferred_platforms", "好みのプラットフォーム", "X, YouTube, note..."],
+      ["preferred_voice", "コンテンツのトーン", "カジュアル、知的、鋭い..."],
+      ["preferred_cta_style", "CTAスタイル", "質問型、行動喚起型..."],
+      ["audience_segments", "ターゲットオーディエンス", "誰に届けたいか"],
+      ["style_examples", "スタイル例", "参考にしている文体やトーン"],
+      ["phrases_to_avoid", "避けたい表現", "使いたくない言葉"],
+    ];
+
+    return (
+      <div>
+        <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0", marginBottom: 8 }}>プロフィール & コンテキスト</h2>
+        <p style={{ fontSize: 12, color: "#666", marginBottom: 24 }}>AIがあなたの文脈を理解し、よりパーソナライズされた分析とコンテンツを生成するための情報です</p>
+
+        {/* API Key Section */}
+        <div style={{ marginBottom: 24, padding: 16, background: "#111", border: "1px solid #2A2A2A", borderRadius: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#E8A838", marginBottom: 12 }}>Anthropic API キー</div>
+          <div style={{ fontSize: 11, color: "#666", marginBottom: 10, lineHeight: 1.6 }}>
+            AI機能を使用するにはAPIキーが必要です。
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type={showKey ? "text" : "password"}
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              placeholder="sk-ant-..."
+              style={{ ...inp, flex: 1 }}
+            />
+            <button onClick={() => setShowKey(!showKey)} style={{
+              padding: "10px 12px", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 6,
+              color: "#888", cursor: "pointer", fontSize: 12, fontFamily: "inherit"
+            }}>{showKey ? "隠す" : "表示"}</button>
+          </div>
+          {apiKey && <div style={{ fontSize: 10, color: "#4A8", marginTop: 6 }}>APIキーが設定されています</div>}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {fields.map(([k, label, ph]) => (
+            <div key={k}>
+              <label style={lbl}>{label}</label>
+              <textarea value={form[k] || ""} onChange={e => u(k, e.target.value)} placeholder={ph}
+                style={{ ...inp, minHeight: 50, resize: "vertical" }} />
+            </div>
+          ))}
+        </div>
+        <button onClick={save} style={{ ...btn, marginTop: 20, position: "relative" }}>
+          {saved ? "保存しました！" : "保存"}
+        </button>
+      </div>
+    );
+  };
+
+  // ─── DRAFTS ───
+  const DraftsPage = () => {
+    const [filter, setFilter] = useState("all");
+    const [editId, setEditId] = useState(null);
+    const [editBody, setEditBody] = useState("");
+
+    const filtered = drafts.filter(d => filter === "all" || d.status === filter)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    const updateDraft = (id, updates) => {
+      saveDrafts(drafts.map(d => d.id === id ? { ...d, ...updates } : d));
+    };
+
+    const deleteDraft = (id) => saveDrafts(drafts.filter(d => d.id !== id));
+
+    return (
+      <div>
+        <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0", marginBottom: 20 }}>コンテンツ下書き</h2>
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {[["all","すべて"],["draft","下書き"],["approved","承認済"],["published","公開済"]].map(([k,l]) => (
+            <button key={k} onClick={() => setFilter(k)} style={{
+              padding: "4px 12px", fontSize: 11, borderRadius: 12, cursor: "pointer",
+              background: filter === k ? "#1A1400" : "transparent",
+              border: `1px solid ${filter === k ? "#E8A838" : "#2A2A2A"}`,
+              color: filter === k ? "#E8A838" : "#666"
+            }}>{l} {k !== "all" && `(${drafts.filter(d => d.status === k).length})`}</button>
+          ))}
+        </div>
+        {filtered.map(d => {
+          const book = books.find(b => b.id === d.book_id);
+          const isEditing = editId === d.id;
+          return (
+            <div key={d.id} style={{ padding: 16, background: "#111", border: "1px solid #1A1A1A", borderRadius: 8, marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <div>
+                  <span style={{ fontSize: 11, color: "#E8A838", marginRight: 8 }}>{d.platform}</span>
+                  <span style={{ fontSize: 13, color: "#E0E0E0" }}>{d.title || "無題"}</span>
+                </div>
+                <span style={{
+                  fontSize: 10, padding: "2px 8px", borderRadius: 8,
+                  background: d.status === "published" ? "#0A1A0A" : d.status === "approved" ? "#1A1A00" : "#1A1A1A",
+                  color: d.status === "published" ? "#4A8" : d.status === "approved" ? "#AA8" : "#666"
+                }}>{d.status}</span>
+              </div>
+              {book && <div style={{ fontSize: 11, color: "#666", marginBottom: 8 }}>{book.title}</div>}
+              {d.hook && <div style={{ fontSize: 12, color: "#E8A838", marginBottom: 6 }}>{d.hook}</div>}
+
+              {isEditing ? (
+                <div>
+                  <textarea value={editBody} onChange={e => setEditBody(e.target.value)}
+                    style={{ ...inp, minHeight: 120, marginBottom: 8 }} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => { updateDraft(d.id, { body: editBody }); setEditId(null); }}
+                      style={{ ...btn, padding: "6px 12px", fontSize: 11, width: "auto" }}>保存</button>
+                    <button onClick={() => setEditId(null)}
+                      style={{ ...btn, padding: "6px 12px", fontSize: 11, background: "transparent", border: "1px solid #2A2A2A", color: "#888", width: "auto" }}>キャンセル</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "#A0A0A0", lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 120, overflow: "hidden" }}>
+                  {d.body}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                {!isEditing && (
+                  <button onClick={() => { setEditId(d.id); setEditBody(d.body || ""); }} style={smallBtn}>編集</button>
+                )}
+                {d.status === "draft" && (
+                  <button onClick={() => updateDraft(d.id, { status: "approved" })} style={smallBtn}>承認</button>
+                )}
+                {d.status === "approved" && (
+                  <button onClick={() => updateDraft(d.id, { status: "published", published_at: new Date().toISOString() })} style={smallBtn}>公開済にする</button>
+                )}
+                <button onClick={() => deleteDraft(d.id)} style={{ ...smallBtn, color: "#994444", borderColor: "#331111" }}>削除</button>
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length === 0 && (
+          <div style={{ textAlign: "center", padding: 40, color: "#444", fontSize: 13 }}>下書きがありません</div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── REVIEW PAGE ───
+  const ReviewPage = () => {
+    const pending = reviews.filter(r => r.review_date <= today() && !r.completed);
+    const upcoming = reviews.filter(r => r.review_date > today() && !r.completed).sort((a,b) => a.review_date.localeCompare(b.review_date)).slice(0, 10);
+
+    const completeReview = (reviewId) => {
+      saveReviews(reviews.map(r => r.id === reviewId ? { ...r, completed: true, completed_at: new Date().toISOString() } : r));
+    };
+
+    const typeLabel = { memory: "記憶", action: "行動", reflection: "振り返り", business: "ビジネス", content: "コンテンツ", deep: "深い振り返り" };
+
+    return (
+      <div>
+        <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0", marginBottom: 20 }}>レビュー</h2>
+
+        {pending.length > 0 ? (
+          <div style={{ marginBottom: 32 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#E8A838", marginBottom: 12 }}>今日のレビュー ({pending.length}件)</h3>
+            {pending.map(r => {
+              const book = books.find(b => b.id === r.book_id);
+              const a = analyses[r.book_id];
+              if (!book) return null;
+              return (
+                <div key={r.id} style={{ padding: 16, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8, marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontSize: 14, color: "#E0E0E0", cursor: "pointer" }} onClick={() => nav("detail", book)}>{book.title}</span>
+                    <span style={{ fontSize: 11, color: "#E8A838" }}>{typeLabel[r.review_type] || r.review_type}</span>
+                  </div>
+                  {a?.ultra_short && <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>{a.ultra_short}</div>}
+                  {a?.key_points && (
+                    <div style={{ fontSize: 12, color: "#A0A0A0", marginBottom: 8 }}>{a.key_points[0]}</div>
+                  )}
+                  <div style={{ fontSize: 12, color: "#666", marginBottom: 12, fontStyle: "italic" }}>
+                    {r.review_type === "memory" && "この本の核心を覚えていますか？"}
+                    {r.review_type === "action" && "アクションアイテムは実行しましたか？"}
+                    {r.review_type === "reflection" && "今この本をどう見ていますか？"}
+                    {r.review_type === "business" && "ビジネスにどう活かせましたか？"}
+                    {r.review_type === "content" && "この本からコンテンツを作りましたか？"}
+                    {r.review_type === "deep" && "この本は自分をどう変えましたか？"}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => nav("detail", book)} style={smallBtn}>詳細</button>
+                    <button onClick={() => completeReview(r.id)} style={{ ...smallBtn, borderColor: "#1A3A1A", color: "#4A8" }}>完了</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ padding: 30, textAlign: "center", color: "#444", marginBottom: 30 }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>--</div>
+            <div style={{ fontSize: 13 }}>今日のレビューはすべて完了です</div>
+          </div>
+        )}
+
+        {upcoming.length > 0 && (
+          <div>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 12 }}>近日予定</h3>
+            {upcoming.map(r => {
+              const book = books.find(b => b.id === r.book_id);
+              return book ? (
+                <div key={r.id} style={{
+                  padding: "10px 0", borderBottom: "1px solid #1A1A1A",
+                  display: "flex", justifyContent: "space-between", alignItems: "center"
+                }}>
+                  <span style={{ fontSize: 13, color: "#A0A0A0" }}>{book.title}</span>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "#666" }}>{typeLabel[r.review_type]}</span>
+                    <span style={{ fontSize: 11, color: "#444" }}>{r.review_date}</span>
+                  </div>
+                </div>
+              ) : null;
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── ANALYTICS ───
+  const AnalyticsPage = () => {
+    const publishedCount = drafts.filter(d => d.status === "published").length;
+    const platformCounts = {};
+    drafts.forEach(d => { platformCounts[d.platform] = (platformCounts[d.platform] || 0) + 1; });
+
+    return (
+      <div>
+        <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0", marginBottom: 20 }}>アナリティクス</h2>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+          {[
+            ["📚", "総書籍数", books.length],
+            ["📝", "コンテンツ数", drafts.length],
+            ["🚀", "公開済み", publishedCount],
+            ["⭐", "平均評価", books.length ? (books.reduce((s, b) => s + b.rating, 0) / books.length).toFixed(1) : "—"],
+          ].map(([icon, label, val]) => (
+            <div key={label} style={{ padding: 16, background: "#111", border: "1px solid #1A1A1A", borderRadius: 8, textAlign: "center" }}>
+              <div style={{ fontSize: 24, marginBottom: 6 }}>{icon}</div>
+              <div style={{ fontSize: 20, fontWeight: 300, color: "#E8A838" }}>{val}</div>
+              <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 12 }}>プラットフォーム別</h3>
+        {Object.entries(platformCounts).map(([p, c]) => (
+          <div key={p} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #1A1A1A" }}>
+            <span style={{ fontSize: 13, color: "#C0C0C0" }}>{p}</span>
+            <span style={{ fontSize: 13, color: "#E8A838" }}>{c}件</span>
+          </div>
+        ))}
+
+        <div style={{ marginTop: 30, padding: 20, background: "#111", borderRadius: 8, border: "1px solid #1E1E1E", textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: "#666" }}>詳細なエンゲージメント分析は今後のアップデートで対応予定です</div>
+        </div>
+      </div>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════
+  // LAYOUT
+  // ═══════════════════════════════════════════════════════════
+  const navItems = [
+    { key: "dash", icon: "◈", label: "ホーム" },
+    { key: "add", icon: "+", label: "追加" },
+    { key: "library", icon: "▤", label: "本棚" },
+    { key: "review", icon: "↻", label: "レビュー" },
+    { key: "drafts", icon: "✎", label: "下書き" },
+    { key: "analytics", icon: "◎", label: "分析" },
+    { key: "profile", icon: "⚙", label: "設定" },
+  ];
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0A0A0A", color: "#D0D0D0",
+      fontFamily: "'Noto Sans JP', 'Hiragino Kaku Gothic ProN', -apple-system, sans-serif"
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: "12px 20px", borderBottom: "1px solid #1A1A1A",
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        position: "sticky", top: 0, background: "#0A0A0A", zIndex: 100
+      }}>
+        <div onClick={() => nav("dash")} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 18, color: "#E8A838" }}>◈</span>
+          <span style={{ fontSize: 15, fontWeight: 500, color: "#E0E0E0", letterSpacing: 2 }}>BookOS</span>
+        </div>
+        {todayReviews.length > 0 && (
+          <span onClick={() => nav("review")} style={{
+            padding: "3px 10px", fontSize: 10, background: "#1A1400", border: "1px solid #332800",
+            borderRadius: 12, color: "#E8A838", cursor: "pointer"
+          }}>{todayReviews.length} レビュー待ち</span>
+        )}
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth: 640, margin: "0 auto", padding: "20px 16px 100px" }}>
+        {aiLoading && <div style={{ position: "fixed", top: 52, left: 0, right: 0, zIndex: 200 }}>
+          <div style={{ height: 2, background: "linear-gradient(90deg, #E8A838, #D4782F, #E8A838)", backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite" }} />
+        </div>}
+
+        {page === "dash" && <DashboardPage />}
+        {page === "add" && <AddBookPage />}
+        {page === "library" && <LibraryPage />}
+        {page === "detail" && <BookDetailPage />}
+        {page === "review" && <ReviewPage />}
+        {page === "drafts" && <DraftsPage />}
+        {page === "analytics" && <AnalyticsPage />}
+        {page === "profile" && <ProfilePage />}
+      </div>
+
+      {/* Bottom Nav */}
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: "#0A0A0A", borderTop: "1px solid #1A1A1A",
+        display: "flex", justifyContent: "center", gap: 0, padding: "0 8px",
+        zIndex: 100
+      }}>
+        {navItems.map(n => (
+          <button key={n.key} onClick={() => nav(n.key)} style={{
+            flex: 1, maxWidth: 72, padding: "10px 4px 8px", background: "none", border: "none",
+            cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            color: page === n.key ? "#E8A838" : "#555", transition: "color 0.2s"
+          }}>
+            <span style={{ fontSize: 16 }}>{n.icon}</span>
+            <span style={{ fontSize: 9, fontWeight: 500 }}>{n.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Mount App ───
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BookOS />);
+</script>
+</body>
+</html>
