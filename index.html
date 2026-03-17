@@ -320,6 +320,10 @@ function BookOS() {
   const saveReviews = useCallback((r) => { setReviews(r); store.set("bos-reviews", r); }, []);
   const saveUserCtx = useCallback((u) => { setUserCtx(u); store.set("bos-userctx", u); }, []);
   const saveStrategies = useCallback((s) => { setStrategies(s); store.set("bos-strategies", s); }, []);
+  const [mentorHistory, setMentorHistory] = useState([]);
+  // Load mentor history
+  useEffect(() => { store.get("bos-mentor-history").then(h => { if (h) setMentorHistory(h); }); }, []);
+  const saveMentorHistory = useCallback((h) => { setMentorHistory(h); store.set("bos-mentor-history", h); }, []);
 
   // ─── Toast ───
   const showToast = useCallback((msg) => {
@@ -1708,6 +1712,15 @@ Return a single JSON object with these exact keys:
         <button onClick={save} style={{ ...btn, marginTop: 20 }}>
           保存
         </button>
+
+        <button onClick={() => nav("analytics")} style={{
+          width: "100%", marginTop: 16, padding: "12px 20px", background: "transparent",
+          border: "1px solid #2A2A2A", borderRadius: 6, color: "#888", fontSize: 13,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8
+        }}>
+          <span>📊</span> 読書統計を見る
+        </button>
       </div>
     );
   };
@@ -1877,6 +1890,290 @@ Return a single JSON object with these exact keys:
     );
   };
 
+  // ─── MENTOR PAGE ───
+  const MentorPage = () => {
+    const [question, setQuestion] = useState("");
+    const [mentorLoading, setMentorLoading] = useState(false);
+    const [currentResponse, setCurrentResponse] = useState(null);
+    const [showHistory, setShowHistory] = useState(false);
+
+    const quickPrompts = [
+      "チームのモチベーションが上がらない",
+      "事業の方向性に迷っている",
+      "部下への任せ方がわからない",
+      "売上が伸び悩んでいる",
+      "採用で良い人が見つからない",
+      "時間管理がうまくいかない"
+    ];
+
+    const handleSubmit = async () => {
+      if (!question.trim()) { showToast("相談内容を入力してください"); return; }
+      if (books.length === 0) { showToast("まず本を登録してください"); return; }
+
+      setMentorLoading(true);
+      setCurrentResponse(null);
+
+      const ctxStr = Object.entries(userCtx).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join("\n");
+
+      const bookKnowledge = books.map(b => {
+        const a = analyses[b.id];
+        if (!a) return `- 「${b.title}」 by ${b.author} (分析なし)`;
+        return `- 「${b.title}」 by ${b.author}
+  核心メッセージ: ${a.core_message || "N/A"}
+  キーポイント: ${(a.key_points || []).slice(0, 3).join(" / ")}
+  アクション: ${(a.action_items || []).slice(0, 3).join(" / ")}
+  ビジネス示唆: ${a.business_implications || "N/A"}
+  タグ: ${(a.tags || []).join(", ")}`;
+      }).join("\n\n");
+
+      const sysPrompt = `You are BookOS AIメンター — a personal strategic advisor who has deeply read and understood every book the user has read. You don't give generic advice. You reference SPECIFIC books and insights from the user's reading history to give tailored guidance.
+
+Your role:
+- Listen to the user's problem or concern
+- Draw from their entire reading history to find relevant insights
+- Connect book knowledge to their specific business situation
+- Give concrete, actionable advice (not vague platitudes)
+- Be honest — if the user's thinking seems wrong based on what they've read, say so directly
+- Reference specific books: "「〇〇」で学んだように..."
+- Think like a mentor who knows their business intimately
+
+Always respond in Japanese. Structure your response clearly.`;
+
+      const userPrompt = `【ユーザーの状況】
+${ctxStr || "（未設定）"}
+
+【読書履歴と知識ベース】
+${bookKnowledge}
+
+【相談内容】
+${question}
+
+以下の形式のJSONで回答してください：
+{
+  "understanding": "相談内容の理解・共感（2-3文）",
+  "diagnosis": "問題の本質（何が根本原因か）",
+  "book_insights": [
+    {
+      "book_title": "参照した本のタイトル",
+      "relevant_insight": "この本からの関連する知恵",
+      "application": "今の状況にどう当てはめるか"
+    }
+  ],
+  "action_plan": [
+    {
+      "priority": 1,
+      "action": "具体的にやるべきこと",
+      "reason": "なぜこれが重要か",
+      "timeframe": "いつまでに"
+    }
+  ],
+  "mindset_correction": "考え方で修正すべき点があれば（なければnull）",
+  "encouragement": "最後の一言（背中を押す言葉）"
+}`;
+
+      const result = await aiCall(sysPrompt, userPrompt, 4000);
+      setMentorLoading(false);
+
+      if (result) {
+        try {
+          const cleaned = result.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+          const parsed = JSON.parse(cleaned);
+          setCurrentResponse(parsed);
+          const entry = { id: uid(), question: question, response: parsed, created_at: new Date().toISOString() };
+          saveMentorHistory([entry, ...mentorHistory]);
+          setQuestion("");
+        } catch {
+          showToast("回答の解析に失敗しました。再度お試しください。");
+        }
+      }
+    };
+
+    const formatResponseText = (resp) => {
+      if (!resp) return "";
+      let text = "";
+      text += "【理解】\n" + resp.understanding + "\n\n";
+      text += "【本質】\n" + resp.diagnosis + "\n\n";
+      if (resp.book_insights?.length) {
+        text += "【本からの知恵】\n";
+        resp.book_insights.forEach(b => {
+          text += `・「${b.book_title}」: ${b.relevant_insight} → ${b.application}\n`;
+        });
+        text += "\n";
+      }
+      if (resp.action_plan?.length) {
+        text += "【行動プラン】\n";
+        resp.action_plan.forEach(a => {
+          text += `${a.priority}. ${a.action}（理由: ${a.reason}、期限: ${a.timeframe}）\n`;
+        });
+        text += "\n";
+      }
+      if (resp.mindset_correction) text += "【考え方の修正】\n" + resp.mindset_correction + "\n\n";
+      text += resp.encouragement || "";
+      return text;
+    };
+
+    const ResponseDisplay = ({ resp }) => (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, animation: "fadeInUp 0.4s ease" }}>
+        {/* Understanding */}
+        <div style={{ padding: 16, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#E8A838", marginBottom: 8 }}>理解</div>
+          <div style={{ fontSize: 13, color: "#D0D0D0", lineHeight: 1.8 }}>{resp.understanding}</div>
+        </div>
+
+        {/* Diagnosis */}
+        <div style={{ padding: 16, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#E8A838", marginBottom: 8 }}>問題の本質</div>
+          <div style={{ fontSize: 13, color: "#D0D0D0", lineHeight: 1.8 }}>{resp.diagnosis}</div>
+        </div>
+
+        {/* Book Insights */}
+        {resp.book_insights?.length > 0 && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#A0A0A0", marginBottom: 10 }}>本からの知恵</div>
+            {resp.book_insights.map((bi, i) => (
+              <div key={i} style={{ padding: 14, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8, marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#E8A838", marginBottom: 6 }}>{bi.book_title}</div>
+                <div style={{ fontSize: 12, color: "#C0C0C0", lineHeight: 1.7, marginBottom: 6 }}>{bi.relevant_insight}</div>
+                <div style={{ fontSize: 12, color: "#A0A0A0", lineHeight: 1.7, paddingLeft: 10, borderLeft: "2px solid #E8A838" }}>{bi.application}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Action Plan */}
+        {resp.action_plan?.length > 0 && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#A0A0A0", marginBottom: 10 }}>行動プラン</div>
+            {resp.action_plan.map((ap, i) => (
+              <div key={i} style={{ padding: 14, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{
+                    width: 22, height: 22, borderRadius: "50%", background: "#E8A838", color: "#0A0A0A",
+                    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, flexShrink: 0
+                  }}>{ap.priority}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#E0E0E0" }}>{ap.action}</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#A0A0A0", lineHeight: 1.6, marginBottom: 4 }}>{ap.reason}</div>
+                <div style={{ fontSize: 11, color: "#888" }}>期限: {ap.timeframe}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Mindset Correction */}
+        {resp.mindset_correction && resp.mindset_correction !== "null" && (
+          <div style={{ padding: 16, background: "#1A1400", border: "1px solid #332800", borderRadius: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#D4782F", marginBottom: 8 }}>考え方の修正</div>
+            <div style={{ fontSize: 13, color: "#D0D0D0", lineHeight: 1.8 }}>{resp.mindset_correction}</div>
+          </div>
+        )}
+
+        {/* Encouragement */}
+        {resp.encouragement && (
+          <div style={{ padding: 16, background: "#0A1A0A", border: "1px solid #1A3A1A", borderRadius: 8, textAlign: "center" }}>
+            <div style={{ fontSize: 14, color: "#D0D0D0", lineHeight: 1.8, fontWeight: 500 }}>{resp.encouragement}</div>
+          </div>
+        )}
+
+        <CopyBtn text={formatResponseText(resp)} />
+      </div>
+    );
+
+    return (
+      <div>
+        <h2 style={{ fontSize: 18, fontWeight: 400, color: "#F0F0F0", marginBottom: 4 }}>AIメンター</h2>
+        <p style={{ fontSize: 12, color: "#666", marginBottom: 24, lineHeight: 1.6 }}>読んだ本の知恵を使って、あなたの悩みに答えます</p>
+
+        {/* Input Area */}
+        <div style={{ marginBottom: 20 }}>
+          <textarea
+            value={question}
+            onChange={e => setQuestion(e.target.value)}
+            placeholder="悩んでいること、行き詰まっていること、判断に迷っていることを話してください..."
+            style={{ ...inp, minHeight: 120, resize: "vertical", fontSize: 14, lineHeight: 1.7 }}
+          />
+          <div style={{ marginTop: 8, padding: 10, background: "#111", borderRadius: 6, border: "1px solid #1E1E1E" }}>
+            <div style={{ fontSize: 12, color: "#C89B30", marginBottom: 4, fontWeight: 600 }}>音声で入力できます</div>
+            <div style={{ fontSize: 11, color: "#666", lineHeight: 1.5 }}>
+              上のテキストエリアをタップ → キーボードの<span style={{ color: "#C89B30", fontWeight: 600 }}> マイクボタン </span>を押すと音声入力できます。
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Prompts */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
+          {quickPrompts.map((qp, i) => (
+            <button key={i} onClick={() => setQuestion(qp)} style={{
+              padding: "6px 14px", fontSize: 12, background: "#111", border: "1px solid #2A2A2A",
+              borderRadius: 16, color: "#A0A0A0", cursor: "pointer", fontFamily: "inherit",
+              transition: "all 0.2s"
+            }}>{qp}</button>
+          ))}
+        </div>
+
+        {/* Submit Button */}
+        <button onClick={handleSubmit} disabled={mentorLoading} style={{
+          ...btn, marginBottom: 24, opacity: mentorLoading ? 0.6 : 1,
+          background: "linear-gradient(135deg, #E8A838, #D4782F)", fontSize: 15, padding: "14px 20px"
+        }}>
+          {mentorLoading ? "相談中..." : "相談する"}
+        </button>
+
+        {/* Loading */}
+        {mentorLoading && <Spinner text="あなたの読書履歴を踏まえてアドバイスを考えています..." />}
+
+        {/* Current Response */}
+        {currentResponse && <ResponseDisplay resp={currentResponse} />}
+
+        {/* History */}
+        {mentorHistory.length > 0 && (
+          <div style={{ marginTop: 32 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <button onClick={() => setShowHistory(!showHistory)} style={{
+                background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+                fontSize: 14, fontWeight: 600, color: "#A0A0A0", padding: 0
+              }}>
+                {showHistory ? "▾" : "▸"} 過去の相談 ({mentorHistory.length}件)
+              </button>
+              {showHistory && (
+                <button onClick={() => {
+                  if (confirm("相談履歴をすべて削除しますか？")) {
+                    saveMentorHistory([]);
+                    setCurrentResponse(null);
+                  }
+                }} style={{ ...smallBtn, color: "#994444", borderColor: "#331111", fontSize: 10 }}>履歴を削除</button>
+              )}
+            </div>
+            {showHistory && mentorHistory.map(entry => (
+              <div key={entry.id} style={{ padding: 14, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8, marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, color: "#E0E0E0", fontWeight: 500 }}>{entry.question}</div>
+                  <span style={{ fontSize: 10, color: "#555", flexShrink: 0, marginLeft: 8 }}>{fmt(entry.created_at)}</span>
+                </div>
+                {entry.response?.understanding && (
+                  <div style={{ fontSize: 12, color: "#888", lineHeight: 1.6, marginBottom: 6 }}>{entry.response.understanding}</div>
+                )}
+                {entry.response?.book_insights?.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#666" }}>
+                    参照: {entry.response.book_insights.map(bi => `「${bi.book_title}」`).join("、")}
+                  </div>
+                )}
+                <button onClick={() => setCurrentResponse(entry.response)} style={{ ...smallBtn, marginTop: 8, fontSize: 10 }}>詳細を見る</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {books.length === 0 && (
+          <div style={{ textAlign: "center", padding: 30, color: "#444", fontSize: 13, marginTop: 20 }}>
+            本を登録すると、AIメンターがあなたの読書履歴を基にアドバイスできるようになります。
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ─── ANALYTICS ───
   const AnalyticsPage = () => {
     const publishedCount = drafts.filter(d => d.status === "published").length;
@@ -2024,12 +2321,12 @@ Return a single JSON object with these exact keys:
   // LAYOUT
   // ═══════════════════════════════════════════════════════════
   const navItems = [
-    { key: "dash", icon: "◈", label: "ホーム" },
+    { key: "dash", icon: "⌂", label: "ホーム" },
     { key: "add", icon: "+", label: "追加" },
     { key: "library", icon: "▤", label: "本棚" },
     { key: "review", icon: "↻", label: "レビュー" },
     { key: "drafts", icon: "✎", label: "下書き" },
-    { key: "analytics", icon: "◎", label: "分析" },
+    { key: "mentor", icon: "💬", label: "相談" },
     { key: "profile", icon: "⚙", label: "設定" },
   ];
 
@@ -2068,6 +2365,7 @@ Return a single JSON object with these exact keys:
         {page === "detail" && <BookDetailPage />}
         {page === "review" && <ReviewPage />}
         {page === "drafts" && <DraftsPage />}
+        {page === "mentor" && <MentorPage />}
         {page === "analytics" && <AnalyticsPage />}
         {page === "profile" && <ProfilePage />}
       </div>
