@@ -20,6 +20,7 @@
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
   @keyframes slideDown { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: #0A0A0A; }
   ::-webkit-scrollbar-thumb { background: #2A2A2A; border-radius: 4px; }
@@ -101,9 +102,12 @@ function getApiKey() {
 }
 
 // ─── AI Helper ───
+// Global toast function reference (set by BookOS component)
+let _globalShowToast = null;
+
 async function aiCall(systemPrompt, userPrompt, maxTokens = 4000) {
   const apiKey = getApiKey();
-  if (!apiKey) { alert("APIキーが設定されていません。設定画面でAnthropicのAPIキーを入力してください。"); return null; }
+  if (!apiKey) { if (_globalShowToast) _globalShowToast("APIキーが設定されていません。設定画面でAPIキーを入力してください。"); else alert("APIキーが設定されていません。"); return null; }
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -123,7 +127,7 @@ async function aiCall(systemPrompt, userPrompt, maxTokens = 4000) {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.error("AI API error:", res.status, err);
-      if (res.status === 401) alert("APIキーが無効です。設定画面で正しいキーを入力してください。");
+      if (res.status === 401) { if (_globalShowToast) _globalShowToast("APIキーが無効です。設定画面で正しいキーを入力してください。"); else alert("APIキーが無効です。"); }
       return null;
     }
     const data = await res.json();
@@ -286,22 +290,25 @@ function BookOS() {
   const [reviews, setReviews] = useState([]);
   const [userCtx, setUserCtx] = useState(defaultCtx);
   const [selectedBook, setSelectedBook] = useState(null);
+  const [strategies, setStrategies] = useState({});
   const [loading, setLoading] = useState(true);
   const [aiLoading, setAiLoading] = useState(false);
+  const [toastMsg, setToastMsg] = useState("");
 
   // ─── Load all data ───
   useEffect(() => {
     (async () => {
-      const [b, a, d, r, u] = await Promise.all([
+      const [b, a, d, r, u, s] = await Promise.all([
         store.get("bos-books"), store.get("bos-analyses"),
         store.get("bos-drafts"), store.get("bos-reviews"),
-        store.get("bos-userctx")
+        store.get("bos-userctx"), store.get("bos-strategies")
       ]);
       if (b) setBooks(b);
       if (a) setAnalyses(a);
       if (d) setDrafts(d);
       if (r) setReviews(r);
       if (u) setUserCtx(u);
+      if (s) setStrategies(s);
       setLoading(false);
     })();
   }, []);
@@ -312,6 +319,16 @@ function BookOS() {
   const saveDrafts = useCallback((d) => { setDrafts(d); store.set("bos-drafts", d); }, []);
   const saveReviews = useCallback((r) => { setReviews(r); store.set("bos-reviews", r); }, []);
   const saveUserCtx = useCallback((u) => { setUserCtx(u); store.set("bos-userctx", u); }, []);
+  const saveStrategies = useCallback((s) => { setStrategies(s); store.set("bos-strategies", s); }, []);
+
+  // ─── Toast ───
+  const showToast = useCallback((msg) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(""), 2500);
+  }, []);
+
+  // Register global toast
+  useEffect(() => { _globalShowToast = showToast; return () => { _globalShowToast = null; }; }, [showToast]);
 
   // ─── Navigation ───
   const nav = (pg, book = null) => { setPage(pg); if (book) setSelectedBook(book); window.scrollTo(0, 0); };
@@ -513,6 +530,8 @@ USER CONTEXT: ${ctxStr || "None"}`;
     const topScored = [...books].map(b => ({ ...b, score: analyses[b.id]?.scores?.content_potential || 0 }))
       .sort((a, b) => b.score - a.score).slice(0, 3);
 
+    const pinnedBooks = books.filter(b => b.pinned);
+
     return (
       <div>
         <div style={{ marginBottom: 32 }}>
@@ -521,6 +540,27 @@ USER CONTEXT: ${ctxStr || "None"}`;
             {books.length}冊の本 · {todayReviews.length}件のレビュー待ち · {pendingDrafts.length}件の下書き
           </p>
         </div>
+
+        {pinnedBooks.length > 0 && (
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 10 }}>📌 ピン留め</h3>
+            <div style={{ display: "flex", gap: 8, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", paddingBottom: 4 }}>
+              {pinnedBooks.map(b => (
+                <div key={b.id} onClick={() => nav("detail", b)} style={{
+                  minWidth: 140, padding: 12, background: "#1A1400", border: "1px solid #332800", borderRadius: 8,
+                  cursor: "pointer", transition: "border-color 0.2s", flexShrink: 0
+                }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = "#E8A838"}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = "#332800"}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 500, color: "#E0E0E0", marginBottom: 4 }}>{b.title}</div>
+                  <div style={{ fontSize: 11, color: "#888" }}>{b.author}</div>
+                  <div style={{ marginTop: 4 }}><Stars value={b.rating} size={10} /></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {todayReviews.length > 0 && (
           <div style={{ background: "#1A1400", border: "1px solid #332800", borderRadius: 8, padding: 16, marginBottom: 24 }}>
@@ -536,6 +576,38 @@ USER CONTEXT: ${ctxStr || "None"}`;
                   <span style={{ color: "#888", fontSize: 11 }}>{r.review_type}</span>
                 </div>
               ) : null;
+            })}
+          </div>
+        )}
+
+        {pendingActions.length > 0 && (
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: "#A0A0A0", marginBottom: 10 }}>📋 未完了アクション</h3>
+            {pendingActions.map(b => {
+              const act = analyses[b.id]?.actions;
+              if (!act) return null;
+              return (
+                <div key={b.id} style={{ padding: 12, background: "#111", border: "1px solid #1A1A1A", borderRadius: 8, marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span onClick={() => nav("detail", b)} style={{ fontSize: 13, fontWeight: 500, color: "#E0E0E0", cursor: "pointer" }}>{b.title}</span>
+                    <button onClick={() => {
+                      const updated = books.map(bk => bk.id === b.id ? { ...bk, actions_done: true } : bk);
+                      saveBooks(updated);
+                      showToast("アクションを完了にしました");
+                    }} style={{ padding: "3px 10px", fontSize: 10, background: "#0A1A0A", border: "1px solid #1A3A1A", borderRadius: 6, color: "#4A8", cursor: "pointer", fontFamily: "inherit" }}>完了</button>
+                  </div>
+                  {act.today && (
+                    <div style={{ fontSize: 12, color: "#C0C0C0", marginBottom: 4 }}>
+                      <span style={{ color: "#E8A838", fontSize: 10, marginRight: 6 }}>TODAY</span>{act.today}
+                    </div>
+                  )}
+                  {act.this_week && (
+                    <div style={{ fontSize: 12, color: "#A0A0A0" }}>
+                      <span style={{ color: "#888", fontSize: 10, marginRight: 6 }}>WEEK</span>{act.this_week}
+                    </div>
+                  )}
+                </div>
+              );
             })}
           </div>
         )}
@@ -957,9 +1029,14 @@ Rules:
     const [genResult, setGenResult] = useState(null);
     const [editing, setEditing] = useState(false);
     const [editForm, setEditForm] = useState({});
+    const [stratLoading, setStratLoading] = useState(false);
+    const [journalText, setJournalText] = useState("");
+    const [journalOpen, setJournalOpen] = useState(false);
     const chatEndRef = useRef(null);
 
     if (!book) return <div style={{ color: "#666" }}>本が選択されていません</div>;
+
+    const strat = strategies[book.id] || null;
 
     const startEdit = () => {
       setEditForm({ title: book.title, author: book.author, genre: book.genre, rating: book.rating, raw_notes: book.raw_notes || "" });
@@ -973,6 +1050,86 @@ Rules:
     };
     const cancelEdit = () => setEditing(false);
 
+    const togglePin = () => {
+      const updated = books.map(b => b.id === book.id ? { ...b, pinned: !b.pinned } : b);
+      saveBooks(updated);
+      setSelectedBook({ ...book, pinned: !book.pinned });
+      showToast(book.pinned ? "ピン留めを解除しました" : "ピン留めしました");
+    };
+
+    const addJournalEntry = () => {
+      if (!journalText.trim()) return;
+      const entry = { id: uid(), text: journalText.trim(), created_at: new Date().toISOString() };
+      const journal = [...(book.journal || []), entry];
+      const updated = books.map(b => b.id === book.id ? { ...b, journal } : b);
+      saveBooks(updated);
+      setSelectedBook({ ...book, journal });
+      setJournalText("");
+      showToast("メモを追加しました");
+    };
+
+    const deleteJournalEntry = (entryId) => {
+      const journal = (book.journal || []).filter(e => e.id !== entryId);
+      const updated = books.map(b => b.id === book.id ? { ...b, journal } : b);
+      saveBooks(updated);
+      setSelectedBook({ ...book, journal });
+    };
+
+    const generateStrategy = async () => {
+      setStratLoading(true);
+      const ctxStr = Object.entries(userCtx).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join("\n");
+      const sys = `You are a personal strategic advisor. You don't just summarize books - you help the user think through HOW to apply insights to THEIR specific situation. Be concrete, specific, and actionable. Think like a mentor who knows their business intimately. Always respond in valid JSON only. No markdown, no explanation outside JSON. Use Japanese.`;
+      const prompt = `Generate a deeply personalized strategic note for this book, combining the book's insights with the user's specific context.
+
+BOOK: "${book.title}" by ${book.author}
+Genre: ${book.genre || "N/A"}
+Rating: ${book.rating}/5
+Raw notes: ${book.raw_notes || "No notes"}
+Analysis: ${JSON.stringify(a || {})}
+
+USER CONTEXT:
+${ctxStr || "No context provided"}
+
+Return a single JSON object with these exact keys:
+{
+  "current_situation_analysis": "ユーザーの現状を踏まえた分析",
+  "people_growth": {
+    "management_style": "この本から学べるマネジメント手法",
+    "team_development": "チームメンバーの伸ばし方",
+    "delegation": "任せ方・権限委譲のポイント",
+    "communication": "コミュニケーションの改善点",
+    "hiring_criteria": "今後の採用で重視すべきこと"
+  },
+  "business_strategy": {
+    "direction": "今後の事業の方向性への示唆",
+    "priorities": "優先すべきこと（やめるべきことも含む）",
+    "competitive_edge": "差別化・強みの活かし方"
+  },
+  "ninety_day_plan": [
+    {"phase": "最初の30日", "focus": "...", "actions": ["action1", "action2"]},
+    {"phase": "31-60日", "focus": "...", "actions": ["action1", "action2"]},
+    {"phase": "61-90日", "focus": "...", "actions": ["action1", "action2"]}
+  ],
+  "mindset_shift": {
+    "from": "今の考え方",
+    "to": "この本を踏まえた新しい考え方",
+    "key_question": "自分に問いかけるべき重要な質問"
+  },
+  "synthesis": "全体を統合した、あなたへの最も重要なメッセージ"
+}`;
+      const result = await aiCall(sys, prompt, 4000);
+      setStratLoading(false);
+      if (!result) return;
+      try {
+        const cleaned = result.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+        const parsed = JSON.parse(cleaned);
+        saveStrategies({ ...strategies, [book.id]: parsed });
+      } catch (e) {
+        console.error("Strategy parse error:", e);
+        showToast("戦略ノートの解析に失敗しました");
+      }
+    };
+
     const tabs = [
       { key: "summary", label: "要約" },
       { key: "thought", label: "思考整理" },
@@ -982,6 +1139,7 @@ Rules:
       { key: "reuse", label: "再利用" },
       { key: "content", label: "コンテンツ" },
       { key: "chat", label: "AIチャット" },
+      { key: "strategy", label: "戦略ノート" },
     ];
 
     const handleChat = async () => {
@@ -1068,8 +1226,11 @@ Rules:
           ) : (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <h2 style={{ fontSize: 20, fontWeight: 400, color: "#F0F0F0", marginBottom: 4 }}>{book.title}</h2>
-                <button onClick={startEdit} style={{ ...smallBtn, fontSize: 11 }}>編集</button>
+                <h2 style={{ fontSize: 20, fontWeight: 400, color: "#F0F0F0", marginBottom: 4, flex: 1 }}>{book.title}</h2>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                  <button onClick={togglePin} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, padding: 2, color: book.pinned ? "#E8A838" : "#555", transition: "color 0.2s" }} title={book.pinned ? "ピン留め解除" : "ピン留め"}>📌</button>
+                  <button onClick={startEdit} style={{ ...smallBtn, fontSize: 11 }}>編集</button>
+                </div>
               </div>
               <div style={{ fontSize: 13, color: "#888" }}>{book.author} · {book.genre} · {fmt(book.finished_at)}</div>
               <div style={{ marginTop: 6 }}><Stars value={book.rating} size={16} /></div>
@@ -1272,11 +1433,143 @@ Rules:
                   </div>
                 </div>
               )}
+
+              {tab === "strategy" && (
+                <div>
+                  {!strat && !stratLoading && (
+                    <div style={{ textAlign: "center", padding: 30 }}>
+                      <div style={{ fontSize: 28, marginBottom: 12 }}>🧭</div>
+                      <div style={{ color: "#888", fontSize: 13, marginBottom: 8 }}>あなた専用の戦略ノートを生成します</div>
+                      <div style={{ color: "#666", fontSize: 11, marginBottom: 16, lineHeight: 1.6 }}>この本の内容とあなたのプロフィール情報を組み合わせて、具体的なアクションプランとマインドシフトを提案します。</div>
+                      <button onClick={generateStrategy} disabled={aiLoading} style={btn}>
+                        {aiLoading ? "生成中..." : "戦略ノートを生成"}
+                      </button>
+                    </div>
+                  )}
+                  {stratLoading && <Spinner text="戦略ノートを生成中..." />}
+                  {strat && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                      <Section title="現状分析">
+                        <div style={{ padding: 14, background: "#1A1400", border: "1px solid #332800", borderRadius: 8, lineHeight: 1.8 }}>{strat.current_situation_analysis}</div>
+                        <CopyBtn text={strat.current_situation_analysis} />
+                      </Section>
+
+                      {strat.people_growth && (
+                        <Section title="人の成長">
+                          {[["management_style","マネジメント手法"],["team_development","チームメンバーの伸ばし方"],["delegation","権限委譲のポイント"],["communication","コミュニケーション改善"],["hiring_criteria","採用で重視すべきこと"]].map(([k,l]) => strat.people_growth[k] ? (
+                            <div key={k} style={{ marginBottom: 12 }}>
+                              <div style={{ fontSize: 11, color: "#E8A838", marginBottom: 4 }}>{l}</div>
+                              <div style={{ padding: 10, background: "#111", border: "1px solid #1E1E1E", borderRadius: 6, fontSize: 13, lineHeight: 1.7 }}>{strat.people_growth[k]}</div>
+                            </div>
+                          ) : null)}
+                          <CopyBtn text={Object.entries(strat.people_growth).map(([k,v]) => `${k}: ${v}`).join("\n")} />
+                        </Section>
+                      )}
+
+                      {strat.business_strategy && (
+                        <Section title="事業戦略">
+                          {[["direction","事業の方向性"],["priorities","優先事項"],["competitive_edge","差別化・強み"]].map(([k,l]) => strat.business_strategy[k] ? (
+                            <div key={k} style={{ marginBottom: 12 }}>
+                              <div style={{ fontSize: 11, color: "#E8A838", marginBottom: 4 }}>{l}</div>
+                              <div style={{ padding: 10, background: "#111", border: "1px solid #1E1E1E", borderRadius: 6, fontSize: 13, lineHeight: 1.7 }}>{strat.business_strategy[k]}</div>
+                            </div>
+                          ) : null)}
+                          <CopyBtn text={Object.entries(strat.business_strategy).map(([k,v]) => `${k}: ${v}`).join("\n")} />
+                        </Section>
+                      )}
+
+                      {strat.ninety_day_plan && (
+                        <Section title="90日アクションプラン">
+                          {strat.ninety_day_plan.map((phase, i) => (
+                            <div key={i} style={{ marginBottom: 16, padding: 14, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8 }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "#E8A838", marginBottom: 6 }}>{phase.phase}</div>
+                              <div style={{ fontSize: 12, color: "#C0C0C0", marginBottom: 8 }}>{phase.focus}</div>
+                              <ul style={{ paddingLeft: 16, margin: 0 }}>
+                                {(phase.actions || []).map((act, j) => <li key={j} style={{ fontSize: 12, color: "#A0A0A0", marginBottom: 4, lineHeight: 1.6 }}>{act}</li>)}
+                              </ul>
+                            </div>
+                          ))}
+                          <CopyBtn text={strat.ninety_day_plan.map(p => `【${p.phase}】${p.focus}\n${(p.actions||[]).map(a => `- ${a}`).join("\n")}`).join("\n\n")} />
+                        </Section>
+                      )}
+
+                      {strat.mindset_shift && (
+                        <Section title="マインドシフト">
+                          <div style={{ padding: 14, background: "#111", border: "1px solid #1E1E1E", borderRadius: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                              <div style={{ flex: 1, padding: 10, background: "#1A1111", border: "1px solid #331111", borderRadius: 6 }}>
+                                <div style={{ fontSize: 10, color: "#994444", marginBottom: 4 }}>FROM</div>
+                                <div style={{ fontSize: 12, color: "#C0C0C0", lineHeight: 1.6 }}>{strat.mindset_shift.from}</div>
+                              </div>
+                              <span style={{ color: "#E8A838", fontSize: 18 }}>→</span>
+                              <div style={{ flex: 1, padding: 10, background: "#0A1A0A", border: "1px solid #1A3A1A", borderRadius: 6 }}>
+                                <div style={{ fontSize: 10, color: "#4A8", marginBottom: 4 }}>TO</div>
+                                <div style={{ fontSize: 12, color: "#C0C0C0", lineHeight: 1.6 }}>{strat.mindset_shift.to}</div>
+                              </div>
+                            </div>
+                            {strat.mindset_shift.key_question && (
+                              <div style={{ padding: 10, background: "#1A1400", border: "1px solid #332800", borderRadius: 6 }}>
+                                <div style={{ fontSize: 10, color: "#E8A838", marginBottom: 4 }}>自分への問い</div>
+                                <div style={{ fontSize: 13, color: "#E0E0E0", lineHeight: 1.6, fontStyle: "italic" }}>{strat.mindset_shift.key_question}</div>
+                              </div>
+                            )}
+                          </div>
+                          <CopyBtn text={`From: ${strat.mindset_shift.from}\nTo: ${strat.mindset_shift.to}\n問い: ${strat.mindset_shift.key_question}`} />
+                        </Section>
+                      )}
+
+                      {strat.synthesis && (
+                        <Section title="統合メッセージ">
+                          <div style={{ padding: 16, background: "#1A1400", border: "1px solid #332800", borderRadius: 8, fontSize: 14, color: "#E0E0E0", lineHeight: 1.8, fontWeight: 300 }}>{strat.synthesis}</div>
+                          <CopyBtn text={strat.synthesis} />
+                        </Section>
+                      )}
+
+                      <button onClick={generateStrategy} disabled={aiLoading || stratLoading} style={{ ...btn, background: "transparent", border: "1px solid #2A2A2A", color: "#888", fontSize: 11 }}>
+                        {stratLoading ? "再生成中..." : "戦略ノートを再生成"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </>
         )}
 
-        <div style={{ borderTop: "1px solid #1A1A1A", marginTop: 30, paddingTop: 16, display: "flex", gap: 8 }}>
+        {/* ─── Journal/追記メモ ─── */}
+        <div style={{ borderTop: "1px solid #1A1A1A", marginTop: 24, paddingTop: 16 }}>
+          <div onClick={() => setJournalOpen(!journalOpen)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: journalOpen ? 12 : 0 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#A0A0A0" }}>📝 追記メモ {(book.journal || []).length > 0 && `(${(book.journal || []).length})`}</span>
+            <span style={{ fontSize: 12, color: "#555", transition: "transform 0.2s", transform: journalOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▼</span>
+          </div>
+          {journalOpen && (
+            <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <textarea value={journalText} onChange={e => setJournalText(e.target.value)}
+                  placeholder="気づき、ふりかえり、追加メモ..."
+                  style={{ ...inp, flex: 1, minHeight: 40, resize: "vertical", transition: "min-height 0.2s" }}
+                  onFocus={e => e.target.style.minHeight = "80px"}
+                  onBlur={e => { if (!journalText) e.target.style.minHeight = "40px"; }}
+                />
+                <button onClick={addJournalEntry} disabled={!journalText.trim()} style={{ ...btn, width: "auto", padding: "8px 14px", alignSelf: "flex-end", opacity: journalText.trim() ? 1 : 0.3 }}>追加</button>
+              </div>
+              {(book.journal || []).slice().reverse().map(entry => (
+                <div key={entry.id} style={{ padding: 10, background: "#111", border: "1px solid #1A1A1A", borderRadius: 6, marginBottom: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 10, color: "#666" }}>{new Date(entry.created_at).toLocaleDateString("ja-JP", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                    <button onClick={() => deleteJournalEntry(entry.id)} style={{ background: "none", border: "none", color: "#553333", cursor: "pointer", fontSize: 12, padding: "2px 6px" }}>×</button>
+                  </div>
+                  <div style={{ fontSize: 13, color: "#C0C0C0", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{entry.text}</div>
+                </div>
+              ))}
+              {(book.journal || []).length === 0 && (
+                <div style={{ textAlign: "center", padding: 16, color: "#444", fontSize: 12 }}>まだメモがありません</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ borderTop: "1px solid #1A1A1A", marginTop: 16, paddingTop: 16, display: "flex", gap: 8 }}>
           <button onClick={handleReanalyze} disabled={aiLoading} style={{
             ...btn, background: "transparent", border: "1px solid #2A2A2A", color: "#888", fontSize: 11
           }}>{aiLoading ? "分析中..." : "再分析"}</button>
@@ -1293,13 +1586,11 @@ Rules:
     const [form, setForm] = useState({ ...userCtx });
     const [apiKey, setApiKey] = useState(getApiKey());
     const [showKey, setShowKey] = useState(false);
-    const [saved, setSaved] = useState(false);
     const u = (k, v) => setForm({ ...form, [k]: v });
     const save = () => {
       saveUserCtx(form);
       localStorage.setItem("bos-api-key", apiKey);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      showToast("プロフィールを保存しました！");
     };
 
     const fields = [
@@ -1363,6 +1654,7 @@ Rules:
                 drafts: JSON.parse(localStorage.getItem("bos-drafts") || "[]"),
                 reviews: JSON.parse(localStorage.getItem("bos-reviews") || "[]"),
                 userctx: JSON.parse(localStorage.getItem("bos-userctx") || "{}"),
+                strategies: JSON.parse(localStorage.getItem("bos-strategies") || "{}"),
                 exportedAt: new Date().toISOString()
               };
               const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -1390,6 +1682,7 @@ Rules:
                     if (data.drafts) { localStorage.setItem("bos-drafts", JSON.stringify(data.drafts)); }
                     if (data.reviews) { localStorage.setItem("bos-reviews", JSON.stringify(data.reviews)); }
                     if (data.userctx) { localStorage.setItem("bos-userctx", JSON.stringify(data.userctx)); }
+                    if (data.strategies) { localStorage.setItem("bos-strategies", JSON.stringify(data.strategies)); }
                     alert("インポートが完了しました。ページをリロードします。");
                     location.reload();
                   } catch (err) {
@@ -1412,8 +1705,8 @@ Rules:
             </div>
           ))}
         </div>
-        <button onClick={save} style={{ ...btn, marginTop: 20, position: "relative" }}>
-          {saved ? "保存しました！" : "保存"}
+        <button onClick={save} style={{ ...btn, marginTop: 20 }}>
+          保存
         </button>
       </div>
     );
@@ -1797,6 +2090,19 @@ Rules:
           </button>
         ))}
       </div>
+
+      {/* Toast */}
+      {toastMsg && (
+        <div style={{
+          position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)",
+          padding: "10px 24px", background: "#1A1A1A", border: "1px solid #E8A838",
+          borderRadius: 8, color: "#E8A838", fontSize: 13, fontWeight: 500,
+          zIndex: 9999, animation: "slideUp 0.3s ease", boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+          whiteSpace: "nowrap", maxWidth: "90vw", textAlign: "center"
+        }}>
+          {toastMsg}
+        </div>
+      )}
     </div>
   );
 }
