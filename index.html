@@ -43,7 +43,14 @@ const { useState, useEffect, useCallback, useRef } = React;
 // ═══════════════════════════════════════
 const SUPA_URL = 'https://xjtldutaxjdjuxltzqxe.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhqdGxkdXRheGpkanV4bHR6cXhlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4NDIzODYsImV4cCI6MjA4OTQxODM4Nn0.oNpiYcqBsF2lOU7POzdueHh-O-rWTHISnK-4rAHw9no';
-const sb = window.supabase.createClient(SUPA_URL, SUPA_KEY);
+const sb = window.supabase.createClient(SUPA_URL, SUPA_KEY, {
+  auth: {
+    persistSession: true,
+    storageKey: 'bookos-auth',
+    autoRefreshToken: true,
+    detectSessionInUrl: true
+  }
+});
 
 // ═══════════════════════════════════════
 // HELPERS
@@ -1233,8 +1240,23 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    sb.auth.getSession().then(({data:{session}}) => { setSession(session); setLoading(false); });
-    const {data:{subscription}} = sb.auth.onAuthStateChange((_event, session) => { setSession(session); });
+    // First check for existing session (persisted in localStorage)
+    sb.auth.getSession().then(({data:{session: s}, error}) => {
+      if (s) {
+        setSession(s);
+      } else if (error) {
+        console.warn('Session restore error:', error.message);
+      }
+      setLoading(false);
+    });
+
+    // Listen for auth changes (login, logout, token refresh)
+    const {data:{subscription}} = sb.auth.onAuthStateChange((event, s) => {
+      console.log('Auth event:', event);
+      setSession(s);
+      if (event === 'TOKEN_REFRESHED') console.log('Token refreshed successfully');
+      if (event === 'SIGNED_OUT') setSession(null);
+    });
     return () => subscription.unsubscribe();
   }, []);
 
