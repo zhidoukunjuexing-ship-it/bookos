@@ -157,16 +157,35 @@ function AuthPage({onAuth}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const translateError = (msg) => {
+    if (!msg) return "不明なエラー";
+    if (msg.includes("Invalid login")) return "メールアドレスまたはパスワードが間違っています";
+    if (msg.includes("Email not confirmed")) return "メールアドレスが未確認です。もう一度サインアップしてください";
+    if (msg.includes("rate limit")) return "リクエスト制限に達しました。しばらく待ってから再試行してください";
+    if (msg.includes("already registered")) return "このメールアドレスは既に登録されています。ログインしてください";
+    if (msg.includes("invalid")) return "入力内容を確認してください";
+    if (msg.includes("Password should be")) return "パスワードは6文字以上にしてください";
+    if (msg.includes("Unable to validate")) return "メールアドレスの形式を確認してください";
+    return msg;
+  };
   const handleSubmit = async () => {
     setError(""); setLoading(true);
-    if (mode === "signup") {
-      const {data,error:e} = await sb.auth.signUp({email,password,options:{data:{display_name:displayName||email.split("@")[0]}}});
-      if (e) { setError(e.message); setLoading(false); return; }
-      showToast("アカウントを作成しました！","success");
-    } else {
-      const {data,error:e} = await sb.auth.signInWithPassword({email,password});
-      if (e) { setError(e.message); setLoading(false); return; }
-    }
+    try {
+      if (mode === "signup") {
+        if (password.length < 6) { setError("パスワードは6文字以上にしてください"); setLoading(false); return; }
+        const {data,error:e} = await sb.auth.signUp({email,password,options:{data:{display_name:displayName||email.split("@")[0]}}});
+        if (e) { setError(translateError(e.message)); setLoading(false); return; }
+        // autoconfirm=trueなのでセッションが返るはず。返らない場合はログイン試行
+        if (!data.session) {
+          const {data:d2,error:e2} = await sb.auth.signInWithPassword({email,password});
+          if (e2) { setError("アカウント作成済み。ログインしてください"); setLoading(false); setMode("login"); return; }
+        }
+        showToast("アカウントを作成しました！","success");
+      } else {
+        const {data,error:e} = await sb.auth.signInWithPassword({email,password});
+        if (e) { setError(translateError(e.message)); setLoading(false); return; }
+      }
+    } catch(err) { setError("接続エラーが発生しました。もう一度お試しください"); }
     setLoading(false);
   };
 
@@ -226,26 +245,44 @@ function BookOS({session}) {
   // ─── Load all data ───
   useEffect(() => {
     (async () => {
-      const [bRes, rRes, dRes, mRes, ucRes, pRes, fRes, frRes, umRes] = await Promise.all([
-        sb.from('books').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
-        sb.from('reviews').select('*').eq('user_id',user.id),
-        sb.from('drafts').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
-        sb.from('mentor_history').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
-        sb.from('user_context').select('*').eq('user_id',user.id).single(),
-        sb.from('profiles').select('*').eq('id',user.id).single(),
-        sb.from('follows').select('*').or(`follower_id.eq.${user.id},following_id.eq.${user.id}`),
-        sb.from('follows').select('*,profiles!follows_follower_id_fkey(display_name)').eq('following_id',user.id).eq('status','pending'),
-        sb.from('messages').select('id',{count:'exact'}).eq('receiver_id',user.id).eq('read',false),
-      ]);
-      if (bRes.data) setBooks(bRes.data);
-      if (rRes.data) setReviews(rRes.data);
-      if (dRes.data) setDrafts(dRes.data);
-      if (mRes.data) setMentorHistory(mRes.data);
-      if (ucRes.data) { setUserCtx(ucRes.data.context||{}); setApiKey(ucRes.data.api_key_encrypted||""); }
-      if (pRes.data) setProfile(pRes.data);
-      if (fRes.data) setFollows(fRes.data);
-      if (frRes.data) setPendingRequests(frRes.data);
-      if (umRes.count != null) setUnreadMsgCount(umRes.count);
+      try {
+        // Ensure profile exists (trigger might not have fired)
+        let {data: pData, error: pErr} = await sb.from('profiles').select('*').eq('id',user.id).single();
+        if (pErr || !pData) {
+          const name = user.user_metadata?.display_name || user.email?.split("@")[0] || "ユーザー";
+          await sb.from('profiles').upsert({id:user.id, display_name:name, bio:"", is_public:false});
+          const r = await sb.from('profiles').select('*').eq('id',user.id).single();
+          pData = r.data;
+        }
+        if (pData) setProfile(pData);
+
+        // Ensure user_context exists
+        let {data: ucData, error: ucErr} = await sb.from('user_context').select('*').eq('user_id',user.id).single();
+        if (ucErr || !ucData) {
+          await sb.from('user_context').upsert({user_id:user.id, context:{}, api_key_encrypted:""});
+          const r = await sb.from('user_context').select('*').eq('user_id',user.id).single();
+          ucData = r.data;
+        }
+        if (ucData) { setUserCtx(ucData.context||{}); setApiKey(ucData.api_key_encrypted||""); }
+
+        // Load remaining data in parallel
+        const [bRes, rRes, dRes, mRes, fRes, frRes, umRes] = await Promise.all([
+          sb.from('books').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
+          sb.from('reviews').select('*').eq('user_id',user.id),
+          sb.from('drafts').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
+          sb.from('mentor_history').select('*').eq('user_id',user.id).order('created_at',{ascending:false}),
+          sb.from('follows').select('*').or(`follower_id.eq.${user.id},following_id.eq.${user.id}`),
+          sb.from('follows').select('*,profiles!follows_follower_id_fkey(display_name)').eq('following_id',user.id).eq('status','pending'),
+          sb.from('messages').select('id',{count:'exact'}).eq('receiver_id',user.id).eq('read',false),
+        ]);
+        if (bRes.data) setBooks(bRes.data);
+        if (rRes.data) setReviews(rRes.data);
+        if (dRes.data) setDrafts(dRes.data);
+        if (mRes.data) setMentorHistory(mRes.data);
+        if (fRes.data) setFollows(fRes.data);
+        if (frRes.data) setPendingRequests(frRes.data);
+        if (umRes.count != null) setUnreadMsgCount(umRes.count);
+      } catch(err) { console.error("Load error:", err); }
       setLoading(false);
     })();
   }, [user.id]);
