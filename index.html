@@ -23,6 +23,10 @@
   ::-webkit-scrollbar-track{background:#0A0A0A}
   ::-webkit-scrollbar-thumb{background:#2A2A2A;border-radius:4px}
   ::selection{background:#E8A83840}
+  @keyframes pulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(232,58,56,0.4)}50%{transform:scale(1.05);box-shadow:0 0 0 12px rgba(232,58,56,0)}}
+  @media(max-width:600px){
+    body{font-size:15px}
+  }
 </style>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -102,11 +106,48 @@ async function aiChat(apiKey, sys, msgs) {
   } catch { return "接続エラーが発生しました。"; }
 }
 
-// ─── Shared Styles ───
-const lbl = {display:"block",fontSize:11,fontWeight:500,color:"#888",marginBottom:4,letterSpacing:0.5};
-const inp = {width:"100%",padding:"10px 12px",background:"#111",border:"1px solid #2A2A2A",borderRadius:6,color:"#E0E0E0",fontSize:13,outline:"none",fontFamily:"inherit",transition:"border-color 0.2s"};
-const btn = {width:"100%",padding:"12px 20px",background:"#E8A838",border:"none",borderRadius:6,color:"#0A0A0A",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.2s"};
-const smallBtn = {padding:"4px 10px",fontSize:11,background:"transparent",border:"1px solid #2A2A2A",borderRadius:6,color:"#888",cursor:"pointer",fontFamily:"inherit"};
+// ─── Shared Styles (mobile-friendly sizes) ───
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+const lbl = {display:"block",fontSize:isMobile?13:11,fontWeight:500,color:"#888",marginBottom:6,letterSpacing:0.5};
+const inp = {width:"100%",padding:isMobile?"14px 14px":"10px 12px",background:"#111",border:"1px solid #2A2A2A",borderRadius:8,color:"#E0E0E0",fontSize:isMobile?16:13,outline:"none",fontFamily:"inherit",transition:"border-color 0.2s"};
+const btn = {width:"100%",padding:isMobile?"16px 20px":"12px 20px",background:"#E8A838",border:"none",borderRadius:8,color:"#0A0A0A",fontSize:isMobile?15:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.2s"};
+const smallBtn = {padding:isMobile?"8px 14px":"4px 10px",fontSize:isMobile?13:11,background:"transparent",border:"1px solid #2A2A2A",borderRadius:8,color:"#888",cursor:"pointer",fontFamily:"inherit"};
+
+// ─── Mic Button (Web Speech API) ───
+function MicButton({onResult, size="large"}) {
+  const [listening, setListening] = useState(false);
+  const recRef = useRef(null);
+  const supported = typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+
+  const toggle = () => {
+    if (listening) { recRef.current?.stop(); setListening(false); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { showToast("このブラウザは音声入力に対応していません","error"); return; }
+    const rec = new SR();
+    rec.lang = 'ja-JP'; rec.interimResults = false; rec.continuous = true; rec.maxAlternatives = 1;
+    recRef.current = rec;
+    rec.onresult = (e) => {
+      let text = '';
+      for (let i = 0; i < e.results.length; i++) { if(e.results[i].isFinal) text += e.results[i][0].transcript; }
+      if (text) onResult(text);
+    };
+    rec.onerror = (e) => { console.error('Speech error:', e.error); setListening(false); if(e.error==='not-allowed') showToast("マイクの許可が必要です。ブラウザの設定を確認してください","error"); };
+    rec.onend = () => setListening(false);
+    rec.start(); setListening(true); showToast("🎤 音声入力中... もう一度タップで停止","info");
+  };
+
+  useEffect(() => () => recRef.current?.stop(), []);
+
+  if (!supported) return null;
+  const isLarge = size === "large";
+  return <button onClick={toggle} style={{
+    width: isLarge ? 64 : 48, height: isLarge ? 64 : 48, borderRadius: "50%",
+    background: listening ? "#E83A38" : "#1E1E1E", border: listening ? "2px solid #E83A38" : "2px solid #333",
+    color: listening ? "#FFF" : "#AAA", fontSize: isLarge ? 28 : 22, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.3s",
+    animation: listening ? "pulse 1.5s ease infinite" : "none", flexShrink: 0
+  }}>🎤</button>;
+}
 
 // ─── Shared Components ───
 function Stars({value, onChange, size=20}) {
@@ -445,15 +486,17 @@ function BookOS({session}) {
 
     if (phase === "capture") return <div style={{display:"flex",flexDirection:"column",minHeight:"70vh"}}>
       <div style={{textAlign:"center",marginBottom:20}}><h2 style={{fontSize:20,fontWeight:300,color:"#F0F0F0",marginBottom:6}}>本を追加</h2><p style={{fontSize:12,color:"#666"}}>読んだ本について自由に入力してください</p></div>
-      <div style={{padding:14,marginBottom:16,background:"#110E00",border:"1px solid #2A2200",borderRadius:10}}>
-        <div style={{fontSize:12,color:"#C89B30",marginBottom:6,fontWeight:600}}>🎤 音声で入力できます</div>
-        <div style={{fontSize:11,color:"#887730",lineHeight:1.7}}>テキストエリアをタップ → キーボードの<span style={{color:"#C89B30",fontWeight:600}}> マイクボタン 🎙️ </span>を押すと音声入力できます。</div>
+      <div style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:12}}>
+        <textarea value={captureText} onChange={e=>setCaptureText(e.target.value)} placeholder="タイトル・著者・感想を自由に入力 or マイクで話しかけてください..." style={{width:"100%",flex:1,minHeight:200,padding:16,background:"#0E0E0E",border:"1px solid #1E1E1E",borderRadius:10,color:"#E0E0E0",fontSize:isMobile?16:15,lineHeight:1.8,resize:"vertical",outline:"none",fontFamily:"inherit"}} autoFocus/>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,paddingTop:8}}>
+          <MicButton onResult={(text) => setCaptureText(prev => prev ? prev + " " + text : text)} size="large"/>
+          <span style={{fontSize:10,color:"#666",textAlign:"center"}}>タップで<br/>音声入力</span>
+        </div>
       </div>
-      <textarea value={captureText} onChange={e=>setCaptureText(e.target.value)} placeholder="タイトル・著者・感想を自由に入力してください..." style={{width:"100%",minHeight:200,padding:16,background:"#0E0E0E",border:"1px solid #1E1E1E",borderRadius:10,color:"#E0E0E0",fontSize:15,lineHeight:1.8,resize:"vertical",outline:"none",fontFamily:"inherit"}} autoFocus/>
-      <div style={{display:"flex",gap:8,marginTop:12}}>
+      <div style={{display:"flex",gap:8}}>
         <button onClick={parseCapture} disabled={!captureText.trim()||aiParsing} style={{...btn,flex:1,opacity:captureText.trim()?1:0.3}}>{aiParsing?"AIが解析中...":"✨ AIで自動解析"}</button>
       </div>
-      <button onClick={()=>{if(captureText.trim()) u("raw_notes",captureText.trim()); setPhase("review")}} style={{marginTop:8,padding:"10px 16px",fontSize:12,background:"transparent",border:"1px solid #1E1E1E",borderRadius:6,color:"#666",cursor:"pointer",fontFamily:"inherit"}}>手動で入力する →</button>
+      <button onClick={()=>{if(captureText.trim()) u("raw_notes",captureText.trim()); setPhase("review")}} style={{marginTop:8,padding:isMobile?"14px 16px":"10px 16px",fontSize:isMobile?14:12,background:"transparent",border:"1px solid #1E1E1E",borderRadius:8,color:"#666",cursor:"pointer",fontFamily:"inherit",width:"100%"}}>手動で入力する →</button>
     </div>;
 
     if (phase === "review") return <div>
@@ -663,7 +706,7 @@ function BookOS({session}) {
           </div>}
           {tab==="chat" && <div>
             <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-              {["この本の核心をシンプルに","著者の主張に反論して","営業に使える洞察は？","マネジメントにどう活かす？"].map(q=><button key={q} onClick={()=>setChatInput(q)} style={{padding:"4px 10px",fontSize:10,background:"#111",border:"1px solid #2A2A2A",borderRadius:12,color:"#888",cursor:"pointer"}}>{q}</button>)}
+              {["この本の核心をシンプルに","著者の主張に反論して","営業に使える洞察は？","マネジメントにどう活かす？"].map(q=><button key={q} onClick={()=>setChatInput(q)} style={{padding:isMobile?"8px 14px":"4px 10px",fontSize:isMobile?13:10,background:"#111",border:"1px solid #2A2A2A",borderRadius:12,color:"#888",cursor:"pointer"}}>{q}</button>)}
             </div>
             <div style={{maxHeight:400,overflowY:"auto",marginBottom:12}}>
               {chatMsgs.map((m,i) => <div key={i} style={{padding:12,marginBottom:8,borderRadius:8,background:m.role==="user"?"#1A1400":"#111",border:`1px solid ${m.role==="user"?"#332800":"#1E1E1E"}`}}>
@@ -673,9 +716,10 @@ function BookOS({session}) {
               {chatLoading && <Spinner text="考え中..."/>}
               <div ref={chatEndRef}/>
             </div>
-            <div style={{display:"flex",gap:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <MicButton onResult={t=>setChatInput(prev=>prev+t)} size="small"/>
               <input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleChat()} placeholder="質問してください..." style={{...inp,flex:1}}/>
-              <button onClick={handleChat} disabled={chatLoading||!chatInput.trim()} style={{...btn,padding:"8px 16px",width:"auto"}}>送信</button>
+              <button onClick={handleChat} disabled={chatLoading||!chatInput.trim()} style={{...btn,padding:isMobile?"14px 16px":"8px 16px",width:"auto"}}>送信</button>
             </div>
           </div>}
         </div>
@@ -961,7 +1005,13 @@ function BookOS({session}) {
           {["チームのモチベーションが上がらない","事業の方向性に迷っている","部下への任せ方がわからない","売上が伸び悩んでいる","時間管理がうまくいかない"].map(q => <button key={q} onClick={()=>setQuestion(q)} style={{padding:"4px 10px",fontSize:10,background:"#111",border:"1px solid #2A2A2A",borderRadius:12,color:"#888",cursor:"pointer"}}>{q}</button>)}
         </div>
 
-        <textarea value={question} onChange={e=>setQuestion(e.target.value)} placeholder="悩んでいること、行き詰まっていること..." style={{width:"100%",minHeight:120,padding:16,background:"#0E0E0E",border:"1px solid #1E1E1E",borderRadius:10,color:"#E0E0E0",fontSize:15,lineHeight:1.8,resize:"vertical",outline:"none",fontFamily:"inherit",marginBottom:12}}/>
+        <div style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:12}}>
+          <textarea value={question} onChange={e=>setQuestion(e.target.value)} placeholder="悩んでいること、行き詰まっていること..." style={{flex:1,minHeight:isMobile?140:120,padding:16,background:"#0E0E0E",border:"1px solid #1E1E1E",borderRadius:10,color:"#E0E0E0",fontSize:isMobile?16:15,lineHeight:1.8,resize:"vertical",outline:"none",fontFamily:"inherit"}}/>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,paddingTop:8}}>
+            <MicButton onResult={(text) => setQuestion(prev => prev ? prev + " " + text : text)} size="large"/>
+            <span style={{fontSize:10,color:"#666",textAlign:"center"}}>タップで<br/>話す</span>
+          </div>
+        </div>
         <button onClick={handleConsult} disabled={mentorLoading||!question.trim()} style={{...btn,opacity:question.trim()?1:0.3}}>{mentorLoading?"相談中...":"🧠 相談する"}</button>
       </>}
 
@@ -1165,11 +1215,11 @@ function BookOS({session}) {
     </div>
 
     {/* Bottom Nav */}
-    <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#0A0A0A",borderTop:"1px solid #1A1A1A",display:"flex",justifyContent:"center",gap:0,padding:"0 4px",zIndex:100}}>
-      {navItems.map(n => <button key={n.key} onClick={()=>nav(n.key)} style={{flex:1,maxWidth:64,padding:"10px 2px 8px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,color:page===n.key?"#E8A838":"#555",transition:"color 0.2s",position:"relative"}}>
-        <span style={{fontSize:16}}>{n.icon}</span>
-        <span style={{fontSize:8,fontWeight:500}}>{n.label}</span>
-        {n.badge > 0 && <span style={{position:"absolute",top:4,right:8,padding:"1px 5px",borderRadius:8,background:"#E8A838",color:"#0A0A0A",fontSize:8,fontWeight:700}}>{n.badge}</span>}
+    <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#0A0A0A",borderTop:"1px solid #1A1A1A",display:"flex",justifyContent:"center",gap:0,padding:isMobile?"0 4px env(safe-area-inset-bottom)":"0 4px",zIndex:100}}>
+      {navItems.map(n => <button key={n.key} onClick={()=>nav(n.key)} style={{flex:1,maxWidth:isMobile?80:64,padding:isMobile?"12px 2px 10px":"10px 2px 8px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:isMobile?4:2,color:page===n.key?"#E8A838":"#555",transition:"color 0.2s",position:"relative"}}>
+        <span style={{fontSize:isMobile?22:16}}>{n.icon}</span>
+        <span style={{fontSize:isMobile?10:8,fontWeight:500}}>{n.label}</span>
+        {n.badge > 0 && <span style={{position:"absolute",top:isMobile?2:4,right:isMobile?6:8,padding:isMobile?"2px 6px":"1px 5px",borderRadius:8,background:"#E8A838",color:"#0A0A0A",fontSize:isMobile?9:8,fontWeight:700}}>{n.badge}</span>}
       </button>)}
     </div>
   </div>;
