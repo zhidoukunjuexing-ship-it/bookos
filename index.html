@@ -924,8 +924,20 @@ function BookOS({session}) {
         const a = b.analysis;
         return `■「${b.title}」${b.author}\nCore: ${a?.core_message||"N/A"}\nKey: ${(a?.key_points||[]).slice(0,3).join("; ")}\nBusiness: ${a?.business?.overall||"N/A"}\nActions: ${a?.actions?.today||"N/A"}`;
       }).join("\n\n");
-      const sys = `You are BookOS AIメンター — a personal strategic advisor who references SPECIFIC books from the user's reading history. Be honest, direct. If the user's thinking seems wrong, say so. Always respond in Japanese. Respond in valid JSON only.`;
-      const prompt = `【ユーザー】\n${ctxStr||"なし"}\n\n【読書履歴】\n${booksKB||"なし"}\n\n【相談】\n${question}\n\nReturn JSON:\n{"understanding":"共感2-3文","diagnosis":"問題の本質","book_insights":[{"book_title":"本のタイトル","relevant_insight":"関連する知恵","application":"どう当てはめるか"}],"action_plan":[{"priority":1,"action":"やるべきこと","reason":"理由","timeframe":"いつまでに"}],"mindset_correction":"修正すべき考え方(なければnull)","encouragement":"背中を押す言葉"}`;
+      const sys = `You are BookOS AIメンター — the user's personal strategic advisor and thinking partner.
+
+あなたの知識源は2つある：
+1.【ユーザーの読書履歴】— ユーザーが実際に読んで学んだ本の知識。これは「本人が吸収した知恵」なので、該当する本があれば最優先で引用する。
+2.【あなた自身の広範な知識】— ビジネス、心理学、マネジメント、リーダーシップ、マーケティング、哲学など、あらゆる分野の一般的な専門知識。ユーザーの読書履歴にない分野の相談にもこの知識で対応する。
+
+回答ルール：
+- ユーザーの読書履歴に関連する本がある場合：その本の知恵を最優先で引用し（book_insightsに入れる）、さらに一般知識で補強する（general_insightsに入れる）
+- 読書履歴に該当する本がない場合：一般知識から有名な理論・フレームワーク・書籍を引用して回答する（general_insightsに入れる）。book_insightsは空配列にする
+- 常にユーザーのビジネス状況・価値観に合わせてパーソナライズする
+- 間違った考え方があれば遠慮なく指摘する
+- 具体的で実行可能なアドバイスをする
+- 日本語で回答。valid JSONのみ。`;
+      const prompt = `【ユーザーの状況】\n${ctxStr||"なし"}\n\n【ユーザーの読書履歴と蓄積された知識】\n${booksKB||"まだ本が登録されていません"}\n\n【相談内容】\n${question}\n\n以下のJSON形式で回答してください：\n{"understanding":"相談内容への共感と理解（2-3文）","diagnosis":"問題の本質（根本原因の分析）","book_insights":[{"book_title":"ユーザーが読んだ本のタイトル","relevant_insight":"その本からの関連する知恵","application":"今の状況にどう当てはめるか"}],"general_insights":[{"source":"理論名・書籍名・フレームワーク名など","insight":"その知見の要点","application":"今の状況にどう活かすか"}],"action_plan":[{"priority":1,"action":"具体的にやるべきこと","reason":"なぜこれが重要か","timeframe":"いつまでに"}],"mindset_correction":"考え方で修正すべき点（なければnull）","encouragement":"背中を押す一言"}\n\n重要：book_insightsには必ず【読書履歴】に実在する本だけを入れること。読書履歴にない本を捏造しないこと。一般知識からの引用はgeneral_insightsに入れること。`;
       const result = await aiCall(apiKey, sys, prompt, 4000);
       setMentorLoading(false);
       if (!result) return;
@@ -938,9 +950,9 @@ function BookOS({session}) {
     };
 
     return <div>
-      <div style={{textAlign:"center",marginBottom:20}}><h2 style={{fontSize:20,fontWeight:300,color:"#F0F0F0",marginBottom:6}}>AIメンター</h2><p style={{fontSize:12,color:"#666"}}>読んだ本の知恵を使って、あなたの悩みに答えます</p></div>
+      <div style={{textAlign:"center",marginBottom:20}}><h2 style={{fontSize:20,fontWeight:300,color:"#F0F0F0",marginBottom:6}}>AIメンター</h2><p style={{fontSize:12,color:"#666"}}>あなたの読書知識 × 幅広い専門知識で悩みに答えます</p></div>
 
-      {books.length === 0 ? <div style={{textAlign:"center",padding:40,color:"#555"}}><div style={{fontSize:28,marginBottom:12}}>📚</div><div>本を追加すると、AIメンターが使えるようになります</div></div> : <>
+      {false ? null : <>
         <div style={{padding:14,marginBottom:16,background:"#110E00",border:"1px solid #2A2200",borderRadius:10}}>
           <div style={{fontSize:11,color:"#887730",lineHeight:1.7}}>🎤 キーボードの<span style={{color:"#C89B30",fontWeight:600}}>マイクボタン</span>で音声入力できます</div>
         </div>
@@ -970,6 +982,14 @@ function BookOS({session}) {
             <div style={{fontSize:13,color:"#E8A838",fontWeight:600,marginBottom:4}}>「{b.book_title}」</div>
             <div style={{fontSize:12,color:"#A0A0A0",marginBottom:4}}>{b.relevant_insight}</div>
             <div style={{fontSize:12,color:"#C0C0C0"}}>→ {b.application}</div>
+          </div>)}
+        </div>}
+        {response.general_insights?.length > 0 && <div style={{marginBottom:12}}>
+          <div style={{fontSize:11,color:"#8B9DC3",fontWeight:600,marginBottom:8}}>🌐 専門知識からの知見</div>
+          {response.general_insights.map((g,i) => <div key={i} style={{padding:14,background:"#0A0E14",borderRadius:8,border:"1px solid #1A2233",marginBottom:8}}>
+            <div style={{fontSize:13,color:"#8B9DC3",fontWeight:600,marginBottom:4}}>{g.source}</div>
+            <div style={{fontSize:12,color:"#A0A0A0",marginBottom:4}}>{g.insight}</div>
+            <div style={{fontSize:12,color:"#C0C0C0"}}>→ {g.application}</div>
           </div>)}
         </div>}
         {response.action_plan?.length > 0 && <div style={{marginBottom:12}}>
