@@ -59,6 +59,40 @@ const uid = () => crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(
 const fmt = d => new Date(d).toLocaleDateString("ja-JP",{year:"numeric",month:"short",day:"numeric"});
 const today = () => new Date().toISOString().split("T")[0];
 const REVIEW_DAYS = [1,3,7,14,30,90];
+
+// Format raw text (especially voice memos) into organized bullet points
+const formatNotes = (text) => {
+  if (!text) return [];
+  // Split by common sentence/thought boundaries
+  const raw = text
+    .replace(/([。．！？!?])\s*/g, '$1\n')       // split on sentence endings
+    .replace(/(?:、で|、それで|、あと|で、|んで、)/g, '\n')  // split on casual conjunctions
+    .replace(/(?:あとは|それと|それから|次に|あとね|あとさ)/g, '\n') // more casual splits
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s.length > 2);  // remove tiny fragments
+
+  // Deduplicate similar items
+  const seen = new Set();
+  const unique = [];
+  for (const item of raw) {
+    const key = item.slice(0, 15);
+    if (!seen.has(key)) { seen.add(key); unique.push(item); }
+  }
+  return unique;
+};
+
+// Render formatted notes as styled bullet list
+function FormattedNotes({text}) {
+  const items = formatNotes(text);
+  if (items.length <= 1) return <div style={{whiteSpace:"pre-wrap",lineHeight:1.8,color:"#D0D0D0"}}>{text}</div>;
+  return <div style={{display:"flex",flexDirection:"column",gap:8}}>
+    {items.map((item, i) => <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+      <span style={{color:"#E8A838",fontSize:8,marginTop:7,flexShrink:0}}>●</span>
+      <span style={{lineHeight:1.7,color:"#D0D0D0",fontSize:14}}>{item}</span>
+    </div>)}
+  </div>;
+}
 const REVIEW_TYPES = ["memory","action","reflection","business","content","deep"];
 
 function genReviews(bookId, userId, finishedDate) {
@@ -441,14 +475,12 @@ function BookOS({session}) {
     return <div>
       <div style={{marginBottom:32}}>
         <h2 style={{fontSize:22,fontWeight:300,color:"#F0F0F0",marginBottom:4}}>こんにちは、{profile.display_name}</h2>
-        <p style={{color:"#666",fontSize:13}}>{books.length}冊 · {acceptedFollowers}フォロワー · {acceptedFollowing}フォロー中</p>
+        <p style={{color:"#666",fontSize:13}}>{books.length}冊</p>
       </div>
 
       {/* Notifications */}
       <div style={{display:"flex",gap:8,marginBottom:20,flexWrap:"wrap"}}>
         {todayReviews.length > 0 && <span onClick={()=>nav("review")} style={{padding:"4px 12px",fontSize:11,background:"#1A1400",border:"1px solid #332800",borderRadius:12,color:"#E8A838",cursor:"pointer"}}>📖 {todayReviews.length}件のレビュー</span>}
-        {pendingRequests.length > 0 && <span onClick={()=>nav("social")} style={{padding:"4px 12px",fontSize:11,background:"#1A1400",border:"1px solid #332800",borderRadius:12,color:"#E8A838",cursor:"pointer"}}>👥 {pendingRequests.length}件のフォローリクエスト</span>}
-        {unreadMsgCount > 0 && <span onClick={()=>nav("dm")} style={{padding:"4px 12px",fontSize:11,background:"#1A1400",border:"1px solid #332800",borderRadius:12,color:"#E8A838",cursor:"pointer"}}>✉ {unreadMsgCount}件の未読</span>}
       </div>
 
       <button onClick={()=>nav("add")} style={{width:"100%",padding:16,background:"#111",border:"1px dashed #2A2A2A",borderRadius:8,color:"#666",fontSize:14,cursor:"pointer",marginBottom:24,fontFamily:"inherit",transition:"all 0.2s"}}
@@ -804,9 +836,9 @@ function BookOS({session}) {
 
       {/* Always show raw notes/info even without AI analysis */}
       {(book.raw_notes || book.why_picked || book.excerpt) && <div style={{marginBottom:20}}>
-        {book.raw_notes && <Section title="📝 読書ノート"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8}}>{book.raw_notes}</div></Section>}
-        {book.why_picked && <Section title="📖 読んだ理由"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8}}>{book.why_picked}</div></Section>}
-        {book.excerpt && <Section title="✏️ 抜粋"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8,fontStyle:"italic"}}>{book.excerpt}</div></Section>}
+        {book.raw_notes && <Section title="📝 読書ノート"><FormattedNotes text={book.raw_notes}/></Section>}
+        {book.why_picked && <Section title="📖 読んだ理由"><div style={{lineHeight:1.8,color:"#D0D0D0"}}>{book.why_picked}</div></Section>}
+        {book.excerpt && <Section title="✏️ 心に残った一文"><div style={{lineHeight:1.8,color:"#D0D0D0",fontStyle:"italic",borderLeft:"3px solid #E8A838",paddingLeft:12}}>{book.excerpt}</div></Section>}
       </div>}
 
       {!a && <div style={{padding:20,background:"#111",borderRadius:10,border:"1px solid #1E1E1E",textAlign:"center",marginBottom:20}}>
@@ -1363,8 +1395,6 @@ function BookOS({session}) {
     {key:"dash",icon:"⌂",label:"ホーム"},
     {key:"add",icon:"+",label:"追加"},
     {key:"library",icon:"▤",label:"本棚"},
-    {key:"social",icon:"👥",label:"みんな"},
-    {key:"dm",icon:"✉",label:"DM",badge:unreadMsgCount},
     {key:"mentor",icon:"💬",label:"相談"},
     {key:"profile",icon:"⚙",label:"設定"},
   ];
@@ -1376,9 +1406,7 @@ function BookOS({session}) {
         <span style={{fontSize:18,color:"#E8A838"}}>📚</span>
         <span style={{fontSize:15,fontWeight:500,color:"#E0E0E0",letterSpacing:2}}>BookOS</span>
       </div>
-      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-        {pendingRequests.length > 0 && <span onClick={()=>nav("social")} style={{padding:"3px 10px",fontSize:10,background:"#1A1400",border:"1px solid #332800",borderRadius:12,color:"#E8A838",cursor:"pointer"}}>👥 {pendingRequests.length}</span>}
-      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}></div>
     </div>
 
     {/* Content */}
