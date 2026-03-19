@@ -87,21 +87,26 @@ function showToast(msg, type="info") {
 
 // ─── AI Helper ───
 async function aiCall(apiKey, systemPrompt, userPrompt, maxTokens=4000) {
-  if (!apiKey) { showToast("APIキーが未設定です","error"); return null; }
+  if (!apiKey) return null;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body: JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system:systemPrompt,messages:[{role:"user",content:userPrompt}]})
     });
-    if (!res.ok) { if(res.status===401) showToast("APIキーが無効です","error"); return null; }
+    if (!res.ok) {
+      if(res.status===401) showToast("APIキーが無効です。設定画面で正しいキーを入力してください","error");
+      else if(res.status===429) showToast("API制限に達しました。少し待ってから再試行してください","error");
+      else console.error("AI API error:", res.status);
+      return null;
+    }
     const data = await res.json();
     return data.content?.[0]?.text || "";
   } catch(e) { console.error("AI error:",e); return null; }
 }
 
 async function aiChat(apiKey, sys, msgs) {
-  if (!apiKey) return "APIキーを設定してください。";
+  if (!apiKey) return "APIキーが未設定です。右下の設定画面（⚙）からAnthropicのAPIキーを登録してください。";
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST",
@@ -460,6 +465,13 @@ function BookOS({session}) {
 
     const parseCapture = async () => {
       if (!captureText.trim()) return;
+      if (!apiKey) {
+        // APIキーなし→手動入力フォームへ直行
+        setForm(prev => ({...prev, raw_notes:captureText, raw_transcript:captureText}));
+        showToast("APIキー未設定のため手動で入力してください。設定画面からAPIキーを登録できます","info");
+        setPhase("review");
+        return;
+      }
       setAiParsing(true);
       const sys = `You are a smart parser for a book reading app. Extract structured book info from rough text. Respond ONLY in valid JSON.`;
       const prompt = `Parse this text:\n"${captureText}"\n\nReturn JSON:\n{"title":"","author":"","genre":"","notes":"everything else as reading notes","why_picked":"","excerpt":""}`;
@@ -496,12 +508,16 @@ function BookOS({session}) {
       }
       if (error || !newBook) { console.error("Book save error:", error); showToast("保存エラー: " + (error?.message || "不明"), "error"); setPhase("review"); return; }
       // Create reviews
-      await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at));
-      // AI analysis
-      const analysis = await analyzeBook(newBook);
-      if (analysis) {
-        await sb.from('books').update({analysis}).eq('id',newBook.id);
-        newBook.analysis = analysis;
+      try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation error:", e); }
+      // AI analysis (only if API key is set)
+      if (apiKey) {
+        const analysis = await analyzeBook(newBook);
+        if (analysis) {
+          await sb.from('books').update({analysis}).eq('id',newBook.id);
+          newBook.analysis = analysis;
+        }
+      } else {
+        showToast("📚 本を保存しました。AI分析は設定→APIキー登録後に利用可能です","info");
       }
       setBooks(prev => [newBook,...prev]);
       const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
