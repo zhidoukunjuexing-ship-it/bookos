@@ -352,7 +352,7 @@ function BookOS({session}) {
         if (fRes.data) setFollows(fRes.data);
         if (frRes.data) setPendingRequests(frRes.data);
         if (umRes.count != null) setUnreadMsgCount(umRes.count);
-      } catch(err) { console.error("Load error:", err); }
+      } catch(err) { console.error("Load error:", err); showToast("データ読み込みエラー: " + err.message, "error"); }
       setLoading(false);
     })();
   }, [user.id]);
@@ -503,45 +503,54 @@ function BookOS({session}) {
       if (!form.title && !form.raw_notes) return;
       setPhase("processing");
       try {
-      const bookData = {
-        title: form.title || "無題の本",
-        author: form.author || "",
-        genre: form.genre || "",
-        rating: parseInt(form.rating) || 4,
-        finished_at: form.finished_at || today(),
-        raw_notes: form.raw_notes || "",
-        why_picked: form.why_picked || "",
-        excerpt: form.excerpt || "",
-        raw_transcript: form.raw_transcript || "",
-        user_id: user.id
-      };
-      let {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
-      // If column error, retry with minimal fields
-      if (error && (error.message||"").includes("column")) {
-        console.warn("Retrying with minimal fields:", error.message);
-        const minData = {title:bookData.title,author:bookData.author,genre:bookData.genre,rating:bookData.rating,finished_at:bookData.finished_at,raw_notes:bookData.raw_notes,user_id:user.id};
-        const r2 = await sb.from('books').insert(minData).select().single();
-        newBook = r2.data; error = r2.error;
-      }
-      if (error || !newBook) { console.error("Book save error:", error); showToast("保存エラー: " + (error?.message || "不明"), "error"); setPhase("review"); return; }
-      // Create reviews
-      try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation error:", e); }
-      // AI analysis (only if API key is set)
-      if (apiKey) {
-        const analysis = await analyzeBook(newBook);
-        if (analysis) {
-          await sb.from('books').update({analysis}).eq('id',newBook.id);
-          newBook.analysis = analysis;
+        const bookData = {
+          title: form.title || "無題の本",
+          author: form.author || "",
+          genre: form.genre || "",
+          rating: parseInt(form.rating) || 4,
+          finished_at: form.finished_at || today(),
+          raw_notes: form.raw_notes || "",
+          why_picked: form.why_picked || "",
+          excerpt: form.excerpt || "",
+          raw_transcript: form.raw_transcript || "",
+          user_id: user.id
+        };
+
+        const {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
+
+        if (error || !newBook) {
+          console.error("Book save error:", error);
+          showToast("保存エラー: " + (error?.message || "不明"), "error");
+          setPhase("review");
+          return;
         }
-      } else {
-        showToast("📚 本を保存しました。AI分析は設定⚙→Gemini APIキー（無料）登録後に使えます","info");
+
+        // Step 2: Reviews (non-blocking)
+        try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
+
+        // Step 3: AI analysis (only if API key is set, non-blocking)
+        if (apiKey) {
+          try {
+            const analysis = await analyzeBook(newBook);
+            if (analysis) {
+              await sb.from('books').update({analysis}).eq('id',newBook.id);
+              newBook.analysis = analysis;
+            }
+          } catch(e) { console.warn("AI analysis skipped:", e); }
+        }
+
+        setBooks(prev => [newBook,...prev]);
+        try {
+          const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
+          if (newRevs) setReviews(prev => [...prev,...newRevs]);
+        } catch(e) {}
+        showToast("本を追加しました！","success");
+        nav("detail", newBook);
+      } catch(err) {
+        console.error("Save exception:", err);
+        alert("保存中に予期しないエラー:\n" + (err?.message || err));
+        setPhase("review");
       }
-      setBooks(prev => [newBook,...prev]);
-      const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
-      if (newRevs) setReviews(prev => [...prev,...newRevs]);
-      showToast("本を追加しました！","success");
-      nav("detail", newBook);
-      } catch(err) { console.error("Save exception:", err); showToast("保存中にエラーが発生しました","error"); setPhase("review"); }
     };
 
     if (phase === "capture") return <div style={{display:"flex",flexDirection:"column",minHeight:"70vh"}}>
