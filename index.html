@@ -530,24 +530,35 @@ function BookOS({session}) {
 
     const parseCapture = async () => {
       if (!captureText.trim()) return;
+      const fullText = captureText.trim();
       // First: always do local parse (instant, no API)
-      const local = localParse(captureText);
-      setForm(prev => ({...prev, title:local.title||prev.title, author:local.author||prev.author, genre:local.genre||prev.genre, raw_notes:local.notes||captureText, why_picked:local.why_picked||prev.why_picked, excerpt:local.excerpt||prev.excerpt, raw_transcript:captureText}));
+      const local = localParse(fullText);
+      // ALWAYS set raw_notes to the full capture text — this is the user's voice memo
+      setForm(prev => ({
+        ...prev,
+        title: local.title || prev.title,
+        author: local.author || prev.author,
+        genre: local.genre || prev.genre,
+        raw_notes: fullText,
+        raw_transcript: fullText,
+        why_picked: local.why_picked || prev.why_picked,
+        excerpt: local.excerpt || prev.excerpt
+      }));
+      setPhase("review");
 
-      // If API key exists, enhance with AI (optional, non-blocking)
+      // If API key exists, enhance title/author with AI (non-blocking, after showing review)
       if (apiKey) {
         setAiParsing(true);
         const sys = `You are a smart parser for a book reading app. Extract structured book info from rough text. Respond ONLY in valid JSON.`;
-        const prompt = `Parse this text:\n"${captureText}"\n\nReturn JSON:\n{"title":"","author":"","genre":"","notes":"everything else as reading notes","why_picked":"","excerpt":""}`;
-        const result = await aiCall(apiKey, sys, prompt, 1000);
+        const prompt = `Parse this text:\n"${fullText}"\n\nReturn JSON:\n{"title":"","author":"","genre":""}`;
+        const result = await aiCall(apiKey, sys, prompt, 500);
         let parsed = {};
         try { parsed = JSON.parse((result||"").replace(/```json\s*/g,"").replace(/```/g,"").trim()); } catch {}
         if (parsed.title || parsed.author) {
-          setForm(prev => ({...prev, title:parsed.title||prev.title, author:parsed.author||prev.author, genre:parsed.genre||prev.genre, raw_notes:parsed.notes||prev.raw_notes, why_picked:parsed.why_picked||prev.why_picked, excerpt:parsed.excerpt||prev.excerpt}));
+          setForm(prev => ({...prev, title:parsed.title||prev.title, author:parsed.author||prev.author, genre:parsed.genre||prev.genre}));
         }
         setAiParsing(false);
       }
-      setPhase("review");
     };
 
     const handleSave = async () => {
@@ -567,8 +578,12 @@ function BookOS({session}) {
           user_id: user.id
         };
 
+        console.log("Saving book data:", JSON.stringify(bookData));
+
         // Save book data immediately — NO AI, NO API calls
-        const {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
+        const {data:newBook, error} = await sb.from('books').insert(bookData).select('*').single();
+
+        console.log("Insert result:", JSON.stringify(newBook), "Error:", error);
 
         if (error || !newBook) {
           console.error("Book save error:", error);
@@ -577,16 +592,30 @@ function BookOS({session}) {
           return;
         }
 
+        // Double-check: if raw_notes is missing from response, re-fetch
+        let finalBook = newBook;
+        if (!newBook.raw_notes && bookData.raw_notes) {
+          console.warn("raw_notes missing from insert response, re-fetching...");
+          const {data:fetched} = await sb.from('books').select('*').eq('id',newBook.id).single();
+          if (fetched) finalBook = fetched;
+          // If still missing, manually merge our local data
+          if (!finalBook.raw_notes) {
+            finalBook = {...finalBook, raw_notes:bookData.raw_notes, why_picked:bookData.why_picked, excerpt:bookData.excerpt, raw_transcript:bookData.raw_transcript};
+          }
+        }
+
+        console.log("Final book:", finalBook.title, "raw_notes length:", (finalBook.raw_notes||"").length);
+
         // Success! Clear draft and navigate
         clearDraft();
-        setBooks(prev => [newBook,...prev]);
+        setBooks(prev => [finalBook,...prev]);
         showToast("本を保存しました！","success");
-        nav("detail", newBook);
+        nav("detail", finalBook);
 
         // Reviews (background, non-blocking)
-        try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
+        try { await sb.from('reviews').insert(genReviews(finalBook.id, user.id, finalBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
         try {
-          const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
+          const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',finalBook.id);
           if (newRevs) setReviews(prev => [...prev,...newRevs]);
         } catch(e) {}
       } catch(err) {
@@ -611,15 +640,24 @@ function BookOS({session}) {
 
     if (phase === "review") return <div>
       <h2 style={{fontSize:18,fontWeight:300,color:"#F0F0F0",marginBottom:16}}>確認 & 編集</h2>
+      {aiParsing && <div style={{padding:8,background:"#1A1400",borderRadius:8,marginBottom:12,textAlign:"center",fontSize:12,color:"#E8A838"}}>✨ AIがタイトル・著者を解析中...</div>}
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div><label style={lbl}>タイトル</label><input value={form.title} onChange={e=>u("title",e.target.value)} placeholder="本のタイトル" style={inp}/></div>
+        <div><label style={lbl}>タイトル *</label><input value={form.title} onChange={e=>u("title",e.target.value)} placeholder="本のタイトルを入力" style={inp}/></div>
         <div><label style={lbl}>著者</label><input value={form.author} onChange={e=>u("author",e.target.value)} placeholder="著者名" style={inp}/></div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
           <div><label style={lbl}>ジャンル</label><input value={form.genre} onChange={e=>u("genre",e.target.value)} placeholder="ビジネス, 哲学..." style={inp}/></div>
           <div><label style={lbl}>読了日</label><input type="date" value={form.finished_at} onChange={e=>u("finished_at",e.target.value)} style={inp}/></div>
         </div>
         <div><label style={lbl}>評価</label><Stars value={form.rating} onChange={v=>u("rating",v)} size={24}/></div>
-        <div><label style={lbl}>読書メモ</label><textarea value={form.raw_notes} onChange={e=>u("raw_notes",e.target.value)} placeholder="感想、気づき..." style={{...inp,minHeight:100,resize:"vertical"}}/></div>
+        <div>
+          <label style={lbl}>📝 読書メモ・感想 {form.raw_notes ? `(${form.raw_notes.length}文字)` : ""}</label>
+          <textarea value={form.raw_notes} onChange={e=>u("raw_notes",e.target.value)} placeholder="感想、気づき、学んだこと..." style={{...inp,minHeight:150,resize:"vertical",lineHeight:1.8}}/>
+          {!form.raw_notes && form.raw_transcript && <div style={{fontSize:11,color:"#E8A838",marginTop:4}}>⚠ メモが空です。音声入力の内容は下の「音声記録」に保存されています</div>}
+        </div>
+        {form.raw_transcript && form.raw_transcript !== form.raw_notes && <div>
+          <label style={lbl}>🎤 音声記録（原文）</label>
+          <div style={{padding:12,background:"#0E0E0E",border:"1px solid #1E1E1E",borderRadius:8,fontSize:13,color:"#999",lineHeight:1.7,maxHeight:120,overflowY:"auto"}}>{form.raw_transcript}</div>
+        </div>}
         <div><label style={lbl}>読んだ理由</label><input value={form.why_picked} onChange={e=>u("why_picked",e.target.value)} placeholder="なぜこの本を読んだ？" style={inp}/></div>
         <div><label style={lbl}>心に残った一文</label><input value={form.excerpt} onChange={e=>u("excerpt",e.target.value)} placeholder="印象的なフレーズ..." style={inp}/></div>
         <div style={{display:"flex",gap:8}}>
@@ -667,7 +705,7 @@ function BookOS({session}) {
   // BOOK DETAIL
   // ═══════════════════════════════════════
   const BookDetailPage = () => {
-    const book = selectedBook;
+    const [book, setBook] = useState(selectedBook);
     const a = book?.analysis || null;
     const [tab, setTab] = useState("summary");
     const [chatMsgs, setChatMsgs] = useState([]);
@@ -679,7 +717,19 @@ function BookOS({session}) {
     const [newMemo, setNewMemo] = useState("");
     const chatEndRef = useRef(null);
 
-    useEffect(() => { if(book) sb.from('memos').select('*').eq('book_id',book.id).order('created_at',{ascending:false}).then(r => { if(r.data) setMemos(r.data); }); }, [book?.id]);
+    // Always re-fetch fresh book data from DB to ensure all fields are present
+    useEffect(() => {
+      if (!selectedBook?.id) return;
+      sb.from('books').select('*').eq('id', selectedBook.id).single().then(({data}) => {
+        if (data) {
+          setBook(data);
+          // Also update in books list
+          setBooks(prev => prev.map(b => b.id===data.id ? data : b));
+          setSelectedBook(data);
+        }
+      });
+      sb.from('memos').select('*').eq('book_id',selectedBook.id).order('created_at',{ascending:false}).then(r => { if(r.data) setMemos(r.data); });
+    }, [selectedBook?.id]);
 
     if (!book) return <div style={{color:"#666"}}>本が選択されていません</div>;
 
@@ -710,8 +760,10 @@ function BookOS({session}) {
       const analysis = await analyzeBook(book);
       if (analysis) {
         await sb.from('books').update({analysis}).eq('id',book.id);
-        setBooks(prev => prev.map(b => b.id===book.id ? {...b,analysis} : b));
-        setSelectedBook({...book,analysis});
+        const updated = {...book,analysis};
+        setBook(updated);
+        setBooks(prev => prev.map(b => b.id===book.id ? updated : b));
+        setSelectedBook(updated);
         showToast("再分析完了","success");
       }
     };
@@ -726,8 +778,10 @@ function BookOS({session}) {
     const handlePin = async () => {
       const newPinned = !book.pinned;
       await sb.from('books').update({pinned:newPinned}).eq('id',book.id);
-      setBooks(prev => prev.map(b => b.id===book.id ? {...b,pinned:newPinned} : b));
-      setSelectedBook({...book,pinned:newPinned});
+      const updated = {...book,pinned:newPinned};
+      setBook(updated);
+      setBooks(prev => prev.map(b => b.id===book.id ? updated : b));
+      setSelectedBook(updated);
       showToast(newPinned?"ピン留めしました":"ピン解除しました","success");
     };
 
