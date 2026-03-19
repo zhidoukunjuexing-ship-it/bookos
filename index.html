@@ -473,9 +473,28 @@ function BookOS({session}) {
     const handleSave = async () => {
       if (!form.title && !form.raw_notes) return;
       setPhase("processing");
-      const bookData = {...form,title:form.title||"無題の本",user_id:user.id};
-      const {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
-      if (error || !newBook) { showToast("保存エラー","error"); setPhase("review"); return; }
+      try {
+      const bookData = {
+        title: form.title || "無題の本",
+        author: form.author || "",
+        genre: form.genre || "",
+        rating: parseInt(form.rating) || 4,
+        finished_at: form.finished_at || today(),
+        raw_notes: form.raw_notes || "",
+        why_picked: form.why_picked || "",
+        excerpt: form.excerpt || "",
+        raw_transcript: form.raw_transcript || "",
+        user_id: user.id
+      };
+      let {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
+      // If column error, retry with minimal fields
+      if (error && (error.message||"").includes("column")) {
+        console.warn("Retrying with minimal fields:", error.message);
+        const minData = {title:bookData.title,author:bookData.author,genre:bookData.genre,rating:bookData.rating,finished_at:bookData.finished_at,raw_notes:bookData.raw_notes,user_id:user.id};
+        const r2 = await sb.from('books').insert(minData).select().single();
+        newBook = r2.data; error = r2.error;
+      }
+      if (error || !newBook) { console.error("Book save error:", error); showToast("保存エラー: " + (error?.message || "不明"), "error"); setPhase("review"); return; }
       // Create reviews
       await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at));
       // AI analysis
@@ -489,6 +508,7 @@ function BookOS({session}) {
       if (newRevs) setReviews(prev => [...prev,...newRevs]);
       showToast("本を追加しました！","success");
       nav("detail", newBook);
+      } catch(err) { console.error("Save exception:", err); showToast("保存中にエラーが発生しました","error"); setPhase("review"); }
     };
 
     if (phase === "capture") return <div style={{display:"flex",flexDirection:"column",minHeight:"70vh"}}>
