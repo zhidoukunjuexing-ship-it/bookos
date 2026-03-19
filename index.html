@@ -535,6 +535,7 @@ function BookOS({session}) {
           user_id: user.id
         };
 
+        // Step 1: Save book data immediately (no AI needed)
         const {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
 
         if (error || !newBook) {
@@ -544,27 +545,31 @@ function BookOS({session}) {
           return;
         }
 
-        // Step 2: Reviews (non-blocking)
-        try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
+        // Book saved! Show success immediately
+        setBooks(prev => [newBook,...prev]);
+        showToast("本を保存しました！","success");
+        nav("detail", newBook);
 
-        // Step 3: AI analysis (only if API key is set, non-blocking)
+        // Step 2: Reviews (background, non-blocking)
+        try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
+        try {
+          const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
+          if (newRevs) setReviews(prev => [...prev,...newRevs]);
+        } catch(e) {}
+
+        // Step 3: AI analysis runs in background AFTER page navigation
         if (apiKey) {
           try {
             const analysis = await analyzeBook(newBook);
             if (analysis) {
               await sb.from('books').update({analysis}).eq('id',newBook.id);
-              newBook.analysis = analysis;
+              const updated = {...newBook, analysis};
+              setBooks(prev => prev.map(b => b.id===newBook.id ? updated : b));
+              setSelectedBook(updated);
+              showToast("AI分析が完了しました！","success");
             }
           } catch(e) { console.warn("AI analysis skipped:", e); }
         }
-
-        setBooks(prev => [newBook,...prev]);
-        try {
-          const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
-          if (newRevs) setReviews(prev => [...prev,...newRevs]);
-        } catch(e) {}
-        showToast("本を追加しました！","success");
-        nav("detail", newBook);
       } catch(err) {
         console.error("Save exception:", err);
         alert("保存中に予期しないエラー:\n" + (err?.message || err));
@@ -600,15 +605,15 @@ function BookOS({session}) {
         <div><label style={lbl}>読書メモ</label><textarea value={form.raw_notes} onChange={e=>u("raw_notes",e.target.value)} placeholder="感想、気づき..." style={{...inp,minHeight:100,resize:"vertical"}}/></div>
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>setPhase("capture")} style={{...btn,width:"auto",padding:"12px 16px",background:"transparent",border:"1px solid #2A2A2A",color:"#888"}}>←</button>
-          <button onClick={handleSave} disabled={!form.title&&!form.raw_notes} style={{...btn,flex:1,opacity:(form.title||form.raw_notes)?1:0.3}}>📚 保存 & AI分析</button>
+          <button onClick={handleSave} disabled={!form.title&&!form.raw_notes} style={{...btn,flex:1,opacity:(form.title||form.raw_notes)?1:0.3}}>📚 保存する</button>
         </div>
       </div>
     </div>;
 
     if (phase === "processing") return <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
       <div style={{width:64,height:64,borderRadius:"50%",border:"2px solid #1E1E1E",borderTopColor:"#E8A838",animation:"spin 1s linear infinite",marginBottom:24}}/>
-      <div style={{fontSize:15,color:"#D0D0D0",marginBottom:8,fontWeight:300}}>AIが分析中</div>
-      <div style={{fontSize:12,color:"#666"}}>{form.title ? `「${form.title}」` : "読書メモ"}を構造化しています...</div>
+      <div style={{fontSize:15,color:"#D0D0D0",marginBottom:8,fontWeight:300}}>保存中...</div>
+      <div style={{fontSize:12,color:"#666"}}>{form.title ? `「${form.title}」` : "読書メモ"}を保存しています</div>
     </div>;
     return null;
   };
@@ -723,95 +728,106 @@ function BookOS({session}) {
         <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>{(a?.tags||[]).map(t=><Tag key={t} text={t}/>)}</div>
       </div>
 
-      {!a && <div style={{textAlign:"center",padding:30}}><div style={{color:"#666",fontSize:13,marginBottom:12}}>AI分析が未生成です</div><button onClick={handleReanalyze} style={btn}>🤖 AI分析を実行</button></div>}
+      {/* Always show raw notes/info even without AI analysis */}
+      {(book.raw_notes || book.why_picked || book.excerpt) && <div style={{marginBottom:20}}>
+        {book.raw_notes && <Section title="📝 読書ノート"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8}}>{book.raw_notes}</div></Section>}
+        {book.why_picked && <Section title="📖 読んだ理由"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8}}>{book.why_picked}</div></Section>}
+        {book.excerpt && <Section title="✏️ 抜粋"><div style={{whiteSpace:"pre-wrap",lineHeight:1.8,fontStyle:"italic"}}>{book.excerpt}</div></Section>}
+      </div>}
 
-      {a && <>
-        <Tabs tabs={tabs} active={tab} onChange={setTab}/>
-        <div style={{padding:"20px 0"}}>
-          {tab==="summary" && <div>
-            <Section title="要約">{a.short_summary}</Section>
-            <Section title="一言">{a.ultra_short}</Section>
-            <Section title="コアメッセージ">{a.core_message}</Section>
-            <Section title="解決する問題">{a.problem_solved}</Section>
-            <Section title="キーポイント"><ul style={{paddingLeft:16}}>{(a.key_points||[]).map((p,i)=><li key={i} style={{marginBottom:6}}>{p}</li>)}</ul></Section>
-            <Section title="驚いたアイデア">{a.surprising_idea}</Section>
-            {a.scores && <Section title="スコア">{Object.entries(a.scores).map(([k,v])=><ScoreBar key={k} label={k.replace(/_/g," ")} value={v}/>)}</Section>}
-          </div>}
-          {tab==="thought" && a.thought_org && <div>
-            <Section title="印象に残ったこと">{a.thought_org.stood_out}</Section>
-            <Section title="共感">{a.thought_org.agreed}</Section>
-            <Section title="不明瞭">{a.thought_org.unclear}</Section>
-            <Section title="挑戦された">{a.thought_org.challenged}</Section>
-            <Section title="思考が広がった">{a.thought_org.expanded}</Section>
-          </div>}
-          {tab==="personal" && a.personal && <div>
-            <Section title="今の自分に重要な理由">{a.personal.why_matters_now}</Section>
-            <Section title="価値観との接続">{a.personal.values_connection}</Section>
-            <Section title="強化する点">{a.personal.reinforces}</Section>
-            <Section title="挑戦する点">{a.personal.challenges}</Section>
-            <Section title="盲点">{a.personal.blind_spots}</Section>
-          </div>}
-          {tab==="business" && a.business && <div>
-            <Section title="全体適用">{a.business.overall}</Section>
-            <Section title="営業">{a.business.sales}</Section>
-            <Section title="リーダーシップ">{a.business.leadership}</Section>
-            <Section title="チーム">{a.business.team}</Section>
-            <Section title="採用">{a.business.hiring}</Section>
-            <Section title="システム">{a.business.systems}</Section>
-            <Section title="戦略">{a.business.strategy}</Section>
-          </div>}
-          {tab==="action" && a.actions && <div>
-            {["today","this_week","experiment","habit"].map(k => <Section key={k} title={{"today":"今日","this_week":"今週","experiment":"実験","habit":"習慣"}[k]}><div style={{padding:12,background:"#111",borderRadius:6,border:"1px solid #1E1E1E"}}>{a.actions[k]}</div></Section>)}
-          </div>}
-          {tab==="reuse" && a.reuse && <div>
-            {["one_min","teaching","conversation","sales_takeaway","leadership_takeaway"].map(k => <Section key={k} title={{"one_min":"1分で説明","teaching":"教える版","conversation":"会話スターター","sales_takeaway":"営業","leadership_takeaway":"リーダーシップ"}[k]}><div style={{padding:12,background:"#111",borderRadius:6,border:"1px solid #1E1E1E"}}>{a.reuse[k]}</div></Section>)}
-          </div>}
-          {tab==="content" && <div>
-            {a.content_angles && <Section title="コンテンツ切り口">{Object.entries(a.content_angles).map(([k,v])=><div key={k} style={{marginBottom:10}}><span style={{fontSize:11,color:"#E8A838"}}>{k.replace(/_/g," ")}</span><div style={{fontSize:13,color:"#C0C0C0",marginTop:2}}>{v}</div></div>)}</Section>}
-            <Section title="コンテンツ生成">
-              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
-                {[["x_post","X投稿"],["x_thread","Xスレッド"],["note_article","note記事"],["youtube_script","YouTube"],["instagram_carousel","Instagram"],["newsletter","ニュースレター"]].map(([k,l])=><button key={k} onClick={()=>setGenPlatform(k)} style={{padding:"6px 12px",fontSize:11,borderRadius:6,cursor:"pointer",background:genPlatform===k?"#1A1400":"#111",border:`1px solid ${genPlatform===k?"#E8A838":"#2A2A2A"}`,color:genPlatform===k?"#E8A838":"#888"}}>{l}</button>)}
-              </div>
-              <button onClick={handleGenerate} disabled={aiLoading} style={btn}>{aiLoading?"生成中...":"✨ コンテンツを生成"}</button>
-            </Section>
-            {genResult && <Section title="生成結果"><div style={{padding:16,background:"#111",borderRadius:8,border:"1px solid #1E1E1E"}}>
-              {genResult.title && <div style={{fontWeight:600,marginBottom:8,color:"#E0E0E0"}}>{genResult.title}</div>}
-              {genResult.hook && <div style={{color:"#E8A838",marginBottom:8,fontSize:12}}>🪝 {genResult.hook}</div>}
-              <div style={{whiteSpace:"pre-wrap",marginBottom:8}}>{typeof genResult.body==="string"?genResult.body:JSON.stringify(genResult.body,null,2)}</div>
-              <div style={{fontSize:11,color:"#666",marginTop:8}}>✅ 下書きに保存済み</div>
-            </div></Section>}
-          </div>}
-          {tab==="memo" && <div>
-            <div style={{marginBottom:16}}>
-              <textarea value={newMemo} onChange={e=>setNewMemo(e.target.value)} placeholder="新しいメモを追加...（読後の気づき、振り返りなど）" style={{...inp,minHeight:80,resize:"vertical",marginBottom:8}}/>
-              <button onClick={addMemo} disabled={!newMemo.trim()} style={{...btn,opacity:newMemo.trim()?1:0.3}}>📝 メモを追加</button>
+      {!a && <div style={{padding:20,background:"#111",borderRadius:10,border:"1px solid #1E1E1E",textAlign:"center",marginBottom:20}}>
+        <div style={{fontSize:14,color:"#888",marginBottom:12}}>{aiLoading ? "🤖 AI分析中..." : "AI分析でもっと深く理解する"}</div>
+        {!aiLoading && <button onClick={handleReanalyze} style={{...btn,maxWidth:280,margin:"0 auto"}}>🤖 AI分析を実行</button>}
+        {aiLoading && <Spinner text="分析中..."/>}
+        <div style={{fontSize:11,color:"#555",marginTop:8}}>Gemini APIキーが必要です（無料）</div>
+      </div>}
+
+      {/* Tabs - show notes/memo/chat even without AI */}
+      <Tabs tabs={a ? tabs : tabs.filter(t=>["memo","chat"].includes(t.key))} active={a ? tab : (tab==="memo"||tab==="chat"?tab:"memo")} onChange={setTab}/>
+      <div style={{padding:"20px 0"}}>
+        {tab==="summary" && a && <div>
+          <Section title="要約">{a.short_summary}</Section>
+          <Section title="一言">{a.ultra_short}</Section>
+          <Section title="コアメッセージ">{a.core_message}</Section>
+          <Section title="解決する問題">{a.problem_solved}</Section>
+          <Section title="キーポイント"><ul style={{paddingLeft:16}}>{(a.key_points||[]).map((p,i)=><li key={i} style={{marginBottom:6}}>{p}</li>)}</ul></Section>
+          <Section title="驚いたアイデア">{a.surprising_idea}</Section>
+          {a.scores && <Section title="スコア">{Object.entries(a.scores).map(([k,v])=><ScoreBar key={k} label={k.replace(/_/g," ")} value={v}/>)}</Section>}
+        </div>}
+        {tab==="thought" && a?.thought_org && <div>
+          <Section title="印象に残ったこと">{a.thought_org.stood_out}</Section>
+          <Section title="共感">{a.thought_org.agreed}</Section>
+          <Section title="不明瞭">{a.thought_org.unclear}</Section>
+          <Section title="挑戦された">{a.thought_org.challenged}</Section>
+          <Section title="思考が広がった">{a.thought_org.expanded}</Section>
+        </div>}
+        {tab==="personal" && a?.personal && <div>
+          <Section title="今の自分に重要な理由">{a.personal.why_matters_now}</Section>
+          <Section title="価値観との接続">{a.personal.values_connection}</Section>
+          <Section title="強化する点">{a.personal.reinforces}</Section>
+          <Section title="挑戦する点">{a.personal.challenges}</Section>
+          <Section title="盲点">{a.personal.blind_spots}</Section>
+        </div>}
+        {tab==="business" && a?.business && <div>
+          <Section title="全体適用">{a.business.overall}</Section>
+          <Section title="営業">{a.business.sales}</Section>
+          <Section title="リーダーシップ">{a.business.leadership}</Section>
+          <Section title="チーム">{a.business.team}</Section>
+          <Section title="採用">{a.business.hiring}</Section>
+          <Section title="システム">{a.business.systems}</Section>
+          <Section title="戦略">{a.business.strategy}</Section>
+        </div>}
+        {tab==="action" && a?.actions && <div>
+          {["today","this_week","experiment","habit"].map(k => <Section key={k} title={{"today":"今日","this_week":"今週","experiment":"実験","habit":"習慣"}[k]}><div style={{padding:12,background:"#111",borderRadius:6,border:"1px solid #1E1E1E"}}>{a.actions[k]}</div></Section>)}
+        </div>}
+        {tab==="reuse" && a?.reuse && <div>
+          {["one_min","teaching","conversation","sales_takeaway","leadership_takeaway"].map(k => <Section key={k} title={{"one_min":"1分で説明","teaching":"教える版","conversation":"会話スターター","sales_takeaway":"営業","leadership_takeaway":"リーダーシップ"}[k]}><div style={{padding:12,background:"#111",borderRadius:6,border:"1px solid #1E1E1E"}}>{a.reuse[k]}</div></Section>)}
+        </div>}
+        {tab==="content" && <div>
+          {a?.content_angles && <Section title="コンテンツ切り口">{Object.entries(a.content_angles).map(([k,v])=><div key={k} style={{marginBottom:10}}><span style={{fontSize:11,color:"#E8A838"}}>{k.replace(/_/g," ")}</span><div style={{fontSize:13,color:"#C0C0C0",marginTop:2}}>{v}</div></div>)}</Section>}
+          <Section title="コンテンツ生成">
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+              {[["x_post","X投稿"],["x_thread","Xスレッド"],["note_article","note記事"],["youtube_script","YouTube"],["instagram_carousel","Instagram"],["newsletter","ニュースレター"]].map(([k,l])=><button key={k} onClick={()=>setGenPlatform(k)} style={{padding:"6px 12px",fontSize:11,borderRadius:6,cursor:"pointer",background:genPlatform===k?"#1A1400":"#111",border:`1px solid ${genPlatform===k?"#E8A838":"#2A2A2A"}`,color:genPlatform===k?"#E8A838":"#888"}}>{l}</button>)}
             </div>
-            {memos.map(m => <div key={m.id} style={{padding:12,background:"#111",borderRadius:8,border:"1px solid #1E1E1E",marginBottom:8}}>
-              <div style={{fontSize:13,color:"#C0C0C0",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{m.content}</div>
-              <div style={{fontSize:10,color:"#555",marginTop:6}}>{fmt(m.created_at)}</div>
+            <button onClick={handleGenerate} disabled={aiLoading} style={btn}>{aiLoading?"生成中...":"✨ コンテンツを生成"}</button>
+          </Section>
+          {genResult && <Section title="生成結果"><div style={{padding:16,background:"#111",borderRadius:8,border:"1px solid #1E1E1E"}}>
+            {genResult.title && <div style={{fontWeight:600,marginBottom:8,color:"#E0E0E0"}}>{genResult.title}</div>}
+            {genResult.hook && <div style={{color:"#E8A838",marginBottom:8,fontSize:12}}>🪝 {genResult.hook}</div>}
+            <div style={{whiteSpace:"pre-wrap",marginBottom:8}}>{typeof genResult.body==="string"?genResult.body:JSON.stringify(genResult.body,null,2)}</div>
+            <div style={{fontSize:11,color:"#666",marginTop:8}}>✅ 下書きに保存済み</div>
+          </div></Section>}
+        </div>}
+        {tab==="memo" && <div>
+          <div style={{marginBottom:16}}>
+            <textarea value={newMemo} onChange={e=>setNewMemo(e.target.value)} placeholder="新しいメモを追加...（読後の気づき、振り返りなど）" style={{...inp,minHeight:80,resize:"vertical",marginBottom:8}}/>
+            <button onClick={addMemo} disabled={!newMemo.trim()} style={{...btn,opacity:newMemo.trim()?1:0.3}}>📝 メモを追加</button>
+          </div>
+          {memos.map(m => <div key={m.id} style={{padding:12,background:"#111",borderRadius:8,border:"1px solid #1E1E1E",marginBottom:8}}>
+            <div style={{fontSize:13,color:"#C0C0C0",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{m.content}</div>
+            <div style={{fontSize:10,color:"#555",marginTop:6}}>{fmt(m.created_at)}</div>
+          </div>)}
+          {memos.length===0 && <div style={{textAlign:"center",padding:30,color:"#444",fontSize:13}}>まだメモがありません</div>}
+        </div>}
+        {tab==="chat" && <div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+            {["この本の核心をシンプルに","著者の主張に反論して","営業に使える洞察は？","マネジメントにどう活かす？"].map(q=><button key={q} onClick={()=>setChatInput(q)} style={{padding:isMobile?"8px 14px":"4px 10px",fontSize:isMobile?13:10,background:"#111",border:"1px solid #2A2A2A",borderRadius:12,color:"#888",cursor:"pointer"}}>{q}</button>)}
+          </div>
+          <div style={{maxHeight:400,overflowY:"auto",marginBottom:12}}>
+            {chatMsgs.map((m,i) => <div key={i} style={{padding:12,marginBottom:8,borderRadius:8,background:m.role==="user"?"#1A1400":"#111",border:`1px solid ${m.role==="user"?"#332800":"#1E1E1E"}`}}>
+              <div style={{fontSize:10,color:"#666",marginBottom:4}}>{m.role==="user"?"あなた":"BookOS AI"}</div>
+              <div style={{fontSize:13,color:"#D0D0D0",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{m.content}</div>
             </div>)}
-            {memos.length===0 && <div style={{textAlign:"center",padding:30,color:"#444",fontSize:13}}>まだメモがありません</div>}
-          </div>}
-          {tab==="chat" && <div>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-              {["この本の核心をシンプルに","著者の主張に反論して","営業に使える洞察は？","マネジメントにどう活かす？"].map(q=><button key={q} onClick={()=>setChatInput(q)} style={{padding:isMobile?"8px 14px":"4px 10px",fontSize:isMobile?13:10,background:"#111",border:"1px solid #2A2A2A",borderRadius:12,color:"#888",cursor:"pointer"}}>{q}</button>)}
-            </div>
-            <div style={{maxHeight:400,overflowY:"auto",marginBottom:12}}>
-              {chatMsgs.map((m,i) => <div key={i} style={{padding:12,marginBottom:8,borderRadius:8,background:m.role==="user"?"#1A1400":"#111",border:`1px solid ${m.role==="user"?"#332800":"#1E1E1E"}`}}>
-                <div style={{fontSize:10,color:"#666",marginBottom:4}}>{m.role==="user"?"あなた":"BookOS AI"}</div>
-                <div style={{fontSize:13,color:"#D0D0D0",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{m.content}</div>
-              </div>)}
-              {chatLoading && <Spinner text="考え中..."/>}
-              <div ref={chatEndRef}/>
-            </div>
-            <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              <MicButton onResult={t=>setChatInput(prev=>prev+t)} size="small"/>
-              <input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleChat()} placeholder="質問してください..." style={{...inp,flex:1}}/>
-              <button onClick={handleChat} disabled={chatLoading||!chatInput.trim()} style={{...btn,padding:isMobile?"14px 16px":"8px 16px",width:"auto"}}>送信</button>
-            </div>
-          </div>}
-        </div>
-      </>}
+            {chatLoading && <Spinner text="考え中..."/>}
+            <div ref={chatEndRef}/>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <MicButton onResult={t=>setChatInput(prev=>prev+t)} size="small"/>
+            <input value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleChat()} placeholder="質問してください..." style={{...inp,flex:1}}/>
+            <button onClick={handleChat} disabled={chatLoading||!chatInput.trim()} style={{...btn,padding:isMobile?"14px 16px":"8px 16px",width:"auto"}}>送信</button>
+          </div>
+        </div>}
+      </div>
 
       <div style={{borderTop:"1px solid #1A1A1A",marginTop:30,paddingTop:16,display:"flex",gap:8}}>
         <button onClick={handleReanalyze} disabled={aiLoading} style={{...smallBtn,borderColor:"#2A2A2A"}}>{aiLoading?"分析中...":"🔄 再分析"}</button>
