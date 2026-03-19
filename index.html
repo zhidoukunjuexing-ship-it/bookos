@@ -493,29 +493,61 @@ function BookOS({session}) {
   // ADD BOOK
   // ═══════════════════════════════════════
   const AddBookPage = () => {
-    const [phase, setPhase] = useState("capture");
-    const [form, setForm] = useState({title:"",author:"",genre:"",rating:4,finished_at:today(),raw_notes:"",why_picked:"",excerpt:"",raw_transcript:""});
-    const [captureText, setCaptureText] = useState("");
+    // Restore draft from localStorage on mount
+    const savedDraft = useRef(null);
+    try { savedDraft.current = JSON.parse(localStorage.getItem('bookos-draft')||'null'); } catch {}
+    const [phase, setPhase] = useState(savedDraft.current?.phase || "capture");
+    const [form, setForm] = useState(savedDraft.current?.form || {title:"",author:"",genre:"",rating:4,finished_at:today(),raw_notes:"",why_picked:"",excerpt:"",raw_transcript:""});
+    const [captureText, setCaptureText] = useState(savedDraft.current?.captureText || "");
     const [aiParsing, setAiParsing] = useState(false);
     const u = (k,v) => setForm(prev=>({...prev,[k]:v}));
 
+    // Auto-save draft to localStorage whenever input changes
+    useEffect(() => {
+      const draft = {phase, form, captureText};
+      localStorage.setItem('bookos-draft', JSON.stringify(draft));
+    }, [phase, form, captureText]);
+
+    const clearDraft = () => localStorage.removeItem('bookos-draft');
+
+    // Smart local parse — extract title/author from text without API
+    const localParse = (text) => {
+      const lines = text.split(/[\n。、,.]/).map(s=>s.trim()).filter(Boolean);
+      let title="", author="", genre="", notes=text;
+      // Try to find title pattern: 「xxx」or 『xxx』
+      const titleMatch = text.match(/[「『](.+?)[」』]/);
+      if (titleMatch) title = titleMatch[1];
+      // Try to find author pattern: xxx著 or 著者:xxx
+      const authorMatch = text.match(/(?:著者[：:]?\s*|by\s+)(.+?)(?:\s|$|、|,)/i) || text.match(/(.+?)(?:著|の本|が書いた)/);
+      if (authorMatch) author = authorMatch[1].trim();
+      // If no patterns found, use first meaningful phrase as title
+      if (!title && lines.length > 0) {
+        const first = lines[0];
+        if (first.length < 40) title = first;
+      }
+      return {title, author, genre, notes, why_picked:"", excerpt:""};
+    };
+
     const parseCapture = async () => {
       if (!captureText.trim()) return;
-      if (!apiKey) {
-        // APIキーなし→手動入力フォームへ直行
-        setForm(prev => ({...prev, raw_notes:captureText, raw_transcript:captureText}));
-        showToast("APIキー未設定のため手動で入力してください。設定⚙からGemini APIキー（無料）を登録できます","info");
-        setPhase("review");
-        return;
+      // First: always do local parse (instant, no API)
+      const local = localParse(captureText);
+      setForm(prev => ({...prev, title:local.title||prev.title, author:local.author||prev.author, genre:local.genre||prev.genre, raw_notes:local.notes||captureText, why_picked:local.why_picked||prev.why_picked, excerpt:local.excerpt||prev.excerpt, raw_transcript:captureText}));
+
+      // If API key exists, enhance with AI (optional, non-blocking)
+      if (apiKey) {
+        setAiParsing(true);
+        const sys = `You are a smart parser for a book reading app. Extract structured book info from rough text. Respond ONLY in valid JSON.`;
+        const prompt = `Parse this text:\n"${captureText}"\n\nReturn JSON:\n{"title":"","author":"","genre":"","notes":"everything else as reading notes","why_picked":"","excerpt":""}`;
+        const result = await aiCall(apiKey, sys, prompt, 1000);
+        let parsed = {};
+        try { parsed = JSON.parse((result||"").replace(/```json\s*/g,"").replace(/```/g,"").trim()); } catch {}
+        if (parsed.title || parsed.author) {
+          setForm(prev => ({...prev, title:parsed.title||prev.title, author:parsed.author||prev.author, genre:parsed.genre||prev.genre, raw_notes:parsed.notes||prev.raw_notes, why_picked:parsed.why_picked||prev.why_picked, excerpt:parsed.excerpt||prev.excerpt}));
+        }
+        setAiParsing(false);
       }
-      setAiParsing(true);
-      const sys = `You are a smart parser for a book reading app. Extract structured book info from rough text. Respond ONLY in valid JSON.`;
-      const prompt = `Parse this text:\n"${captureText}"\n\nReturn JSON:\n{"title":"","author":"","genre":"","notes":"everything else as reading notes","why_picked":"","excerpt":""}`;
-      const result = await aiCall(apiKey, sys, prompt, 1000);
-      let parsed = {};
-      try { parsed = JSON.parse((result||"").replace(/```json\s*/g,"").replace(/```/g,"").trim()); } catch { parsed = {notes:captureText}; }
-      setForm(prev => ({...prev,title:parsed.title||prev.title,author:parsed.author||prev.author,genre:parsed.genre||prev.genre,raw_notes:parsed.notes||captureText,why_picked:parsed.why_picked||prev.why_picked,excerpt:parsed.excerpt||prev.excerpt,raw_transcript:captureText}));
-      setAiParsing(false); setPhase("review");
+      setPhase("review");
     };
 
     const handleSave = async () => {
@@ -535,7 +567,7 @@ function BookOS({session}) {
           user_id: user.id
         };
 
-        // Step 1: Save book data immediately (no AI needed)
+        // Save book data immediately — NO AI, NO API calls
         const {data:newBook, error} = await sb.from('books').insert(bookData).select().single();
 
         if (error || !newBook) {
@@ -545,31 +577,18 @@ function BookOS({session}) {
           return;
         }
 
-        // Book saved! Show success immediately
+        // Success! Clear draft and navigate
+        clearDraft();
         setBooks(prev => [newBook,...prev]);
         showToast("本を保存しました！","success");
         nav("detail", newBook);
 
-        // Step 2: Reviews (background, non-blocking)
+        // Reviews (background, non-blocking)
         try { await sb.from('reviews').insert(genReviews(newBook.id, user.id, newBook.finished_at)); } catch(e) { console.warn("Review creation:", e); }
         try {
           const {data:newRevs} = await sb.from('reviews').select('*').eq('book_id',newBook.id);
           if (newRevs) setReviews(prev => [...prev,...newRevs]);
         } catch(e) {}
-
-        // Step 3: AI analysis runs in background AFTER page navigation
-        if (apiKey) {
-          try {
-            const analysis = await analyzeBook(newBook);
-            if (analysis) {
-              await sb.from('books').update({analysis}).eq('id',newBook.id);
-              const updated = {...newBook, analysis};
-              setBooks(prev => prev.map(b => b.id===newBook.id ? updated : b));
-              setSelectedBook(updated);
-              showToast("AI分析が完了しました！","success");
-            }
-          } catch(e) { console.warn("AI analysis skipped:", e); }
-        }
       } catch(err) {
         console.error("Save exception:", err);
         alert("保存中に予期しないエラー:\n" + (err?.message || err));
@@ -586,10 +605,8 @@ function BookOS({session}) {
           <span style={{fontSize:10,color:"#666",textAlign:"center"}}>タップで<br/>音声入力</span>
         </div>
       </div>
-      <div style={{display:"flex",gap:8}}>
-        <button onClick={parseCapture} disabled={!captureText.trim()||aiParsing} style={{...btn,flex:1,opacity:captureText.trim()?1:0.3}}>{aiParsing?"AIが解析中...":"✨ AIで自動解析"}</button>
-      </div>
-      <button onClick={()=>{if(captureText.trim()) u("raw_notes",captureText.trim()); setPhase("review")}} style={{marginTop:8,padding:isMobile?"14px 16px":"10px 16px",fontSize:isMobile?14:12,background:"transparent",border:"1px solid #1E1E1E",borderRadius:8,color:"#666",cursor:"pointer",fontFamily:"inherit",width:"100%"}}>手動で入力する →</button>
+      <button onClick={parseCapture} disabled={!captureText.trim()||aiParsing} style={{...btn,opacity:captureText.trim()?1:0.3,marginBottom:8}}>{aiParsing?"解析中...":"次へ →（タイトル・著者を自動抽出）"}</button>
+      {captureText.trim() && <div style={{textAlign:"center",fontSize:11,color:"#555"}}>💾 入力内容は自動保存されます。画面を離れても消えません</div>}
     </div>;
 
     if (phase === "review") return <div>
@@ -603,10 +620,13 @@ function BookOS({session}) {
         </div>
         <div><label style={lbl}>評価</label><Stars value={form.rating} onChange={v=>u("rating",v)} size={24}/></div>
         <div><label style={lbl}>読書メモ</label><textarea value={form.raw_notes} onChange={e=>u("raw_notes",e.target.value)} placeholder="感想、気づき..." style={{...inp,minHeight:100,resize:"vertical"}}/></div>
+        <div><label style={lbl}>読んだ理由</label><input value={form.why_picked} onChange={e=>u("why_picked",e.target.value)} placeholder="なぜこの本を読んだ？" style={inp}/></div>
+        <div><label style={lbl}>心に残った一文</label><input value={form.excerpt} onChange={e=>u("excerpt",e.target.value)} placeholder="印象的なフレーズ..." style={inp}/></div>
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>setPhase("capture")} style={{...btn,width:"auto",padding:"12px 16px",background:"transparent",border:"1px solid #2A2A2A",color:"#888"}}>←</button>
           <button onClick={handleSave} disabled={!form.title&&!form.raw_notes} style={{...btn,flex:1,opacity:(form.title||form.raw_notes)?1:0.3}}>📚 保存する</button>
         </div>
+        <button onClick={()=>{clearDraft();setPhase("capture");setCaptureText("");setForm({title:"",author:"",genre:"",rating:4,finished_at:today(),raw_notes:"",why_picked:"",excerpt:"",raw_transcript:""});}} style={{marginTop:4,padding:"8px",fontSize:11,background:"transparent",border:"none",color:"#555",cursor:"pointer",textAlign:"center",width:"100%"}}>🗑 下書きをクリア</button>
       </div>
     </div>;
 
@@ -1059,8 +1079,9 @@ function BookOS({session}) {
   // MENTOR PAGE
   // ═══════════════════════════════════════
   const MentorPage = () => {
-    const [question, setQuestion] = useState("");
+    const [question, setQuestion] = useState(() => { try { return localStorage.getItem('bookos-mentor-q')||""; } catch { return ""; } });
     const [response, setResponse] = useState(null);
+    useEffect(() => { try { localStorage.setItem('bookos-mentor-q', question); } catch {} }, [question]);
     const [mentorLoading, setMentorLoading] = useState(false);
     const [showHistory, setShowHistory] = useState(false);
 
