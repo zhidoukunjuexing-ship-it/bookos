@@ -90,49 +90,68 @@ function showToast(msg, type="info") {
 // GEMINI AI (Free - no credit card needed)
 // Get key at: https://aistudio.google.com/apikey
 // ═══════════════════════════════════════
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.0-flash-lite";
 
-async function aiCall(apiKey, systemPrompt, userPrompt, maxTokens=4000) {
+async function aiCall(apiKey, systemPrompt, userPrompt, maxTokens=4000, retries=2) {
   if (!apiKey) return null;
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        systemInstruction: {parts:[{text:systemPrompt}]},
-        contents: [{role:"user",parts:[{text:userPrompt}]}],
-        generationConfig: {maxOutputTokens:maxTokens, temperature:0.7}
-      })
-    });
-    if (!res.ok) {
-      const errData = await res.json().catch(()=>({}));
-      const errMsg = errData?.error?.message || "";
-      if(res.status===400 && errMsg.includes("API key")) showToast("APIキーが無効です。設定画面で正しいキーを入力してください","error");
-      else if(res.status===429) showToast("API制限に達しました。少し待ってから再試行してください","error");
-      else console.error("AI API error:", res.status, errMsg);
-      return null;
-    }
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  } catch(e) { console.error("AI error:",e); return null; }
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          systemInstruction: {parts:[{text:systemPrompt}]},
+          contents: [{role:"user",parts:[{text:userPrompt}]}],
+          generationConfig: {maxOutputTokens:maxTokens, temperature:0.7}
+        })
+      });
+      if (res.status === 429) {
+        if (attempt < retries) {
+          const wait = (attempt + 1) * 5;
+          showToast(`API制限中...${wait}秒後に再試行します (${attempt+1}/${retries})`, "info");
+          await new Promise(r => setTimeout(r, wait * 1000));
+          continue;
+        }
+        showToast("API制限に達しました。1分ほど待ってから再試行してください","error");
+        return null;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(()=>({}));
+        const errMsg = errData?.error?.message || "";
+        if(res.status===400 && errMsg.includes("API key")) showToast("APIキーが無効です。設定画面で正しいキーを入力してください","error");
+        else console.error("AI API error:", res.status, errMsg);
+        return null;
+      }
+      const data = await res.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    } catch(e) { console.error("AI error:",e); return null; }
+  }
+  return null;
 }
 
 async function aiChat(apiKey, sys, msgs) {
   if (!apiKey) return "APIキーが未設定です。右下の設定画面（⚙）からGemini APIキーを登録してください（無料）。\n\n取得方法: https://aistudio.google.com/apikey にアクセス→「APIキーを作成」→コピーして貼り付け";
-  try {
-    const contents = msgs.map(m => ({role: m.role === "assistant" ? "model" : "user", parts:[{text:m.content}]}));
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        systemInstruction: {parts:[{text:sys}]},
-        contents: contents,
-        generationConfig: {maxOutputTokens:2000, temperature:0.7}
-      })
-    });
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "エラーが発生しました。";
-  } catch { return "接続エラーが発生しました。"; }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const contents = msgs.map(m => ({role: m.role === "assistant" ? "model" : "user", parts:[{text:m.content}]}));
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          systemInstruction: {parts:[{text:sys}]},
+          contents: contents,
+          generationConfig: {maxOutputTokens:2000, temperature:0.7}
+        })
+      });
+      if (res.status === 429) {
+        await new Promise(r => setTimeout(r, (attempt + 1) * 5000));
+        continue;
+      }
+      const data = await res.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "エラーが発生しました。";
+    } catch { return "接続エラーが発生しました。"; }
+  }
+  return "API制限中です。1分ほど待ってからもう一度お試しください。";
 }
 
 // ─── Shared Styles (mobile-friendly sizes) ───
